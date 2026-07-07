@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -15,6 +16,10 @@ from torch import Tensor, nn
 
 POSSIBLE_EXP_GOL_COUNT = {
     "arm": {
+        "weight": torch.linspace(0, 12, 13, device="cpu"),
+        "bias": torch.linspace(0, 12, 13, device="cpu"),
+    },
+    "sp_arm": {
         "weight": torch.linspace(0, 12, 13, device="cpu"),
         "bias": torch.linspace(0, 12, 13, device="cpu"),
     },

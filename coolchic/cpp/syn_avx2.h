@@ -1,12 +1,17 @@
 /*
-    Software Name: Cool-Chic
+    Software Name: Cool-Chic / LANCE
     SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+    SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
     SPDX-License-Identifier: BSD 3-Clause "New"
 
     This software is distributed under the BSD-3-Clause license.
     Authors: see CONTRIBUTORS.md
 */
 
+#ifndef SYN_AVX2_H
+#define SYN_AVX2_H
+
+#include <cstdint>
 
 template <typename P>
 void custom_conv_ks1_in7_out9_avx2(int KS, P *kw, P *kb, int h_in, int w_in, int stride_in, int plane_stride_in, int residue_origin_offset, int N_IN, P *in, int N_OUT, P *out, int residue, int relu);
@@ -73,3 +78,5 @@ void custom_conv_ks3_inX_outX_lb_avx2(int KS, P *kw, P *kb, int h_in, int w_in, 
 
 void syn_blend1_avx2(int h_in, int w_in, int stride_in, int plane_stride_in, int N_INOUT, int32_t *in, int32_t blend_val_in, int32_t *out);
 void syn_blend2_avx2(int h_in, int w_in, int stride_in, int plane_stride_in, int N_INOUT, int32_t *in, int32_t blend_val_in, int32_t *out, int32_t blend_val_out);
+
+#endif // SYN_AVX2_H

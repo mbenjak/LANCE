@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -27,11 +28,14 @@ class LossFunctionOutput():
     mse: Optional[float] = None                         # Mean squared error                               [ / ]
     rate_latent_bpp: Optional[Dict[str, float]] = None  # Rate associated to the latent of each cool-chic  [bpp]
     total_rate_nn_bpp: float = 0.                       # Total rate associated to the all NNs of all cool-chic [bpp]
+    rate_spatial_prior_map_bpp: Optional[Dict[str, float]] = None  # Rate associated to the spatial prior map of each cool-chic  [bpp]
+
 
     # ==================== Not set by the init function ===================== #
     # Everything here is derived from the above metrics
     psnr_db: Optional[float] = field(init=False, default=None)                  # PSNR                            [ dB]
     total_rate_latent_bpp: Optional[float] = field(init=False, default=None)    # Overall rate of all the latents [bpp]
+    total_rate_spatial_prior_map_bpp: Optional[float] = field(init=False, default=None)  # Overall rate of the spatial prior map [bpp] --- IGNORE ---
     total_rate_bpp: Optional[float] = field(init=False, default=None)           # Overall rate: latent & NNs      [bpp]
     # ==================== Not set by the init function ===================== #
 
@@ -44,7 +48,12 @@ class LossFunctionOutput():
         else:
             self.total_rate_latent_bpp = 0
 
-        self.total_rate_bpp = self.total_rate_latent_bpp + self.total_rate_nn_bpp
+        if self.rate_spatial_prior_map_bpp is not None:
+            self.total_rate_spatial_prior_map_bpp = self.rate_spatial_prior_map_bpp
+        else:
+            self.total_rate_spatial_prior_map_bpp = 0
+
+        self.total_rate_bpp = self.total_rate_latent_bpp + self.total_rate_nn_bpp + self.total_rate_spatial_prior_map_bpp
 
 
 def _compute_mse(
@@ -91,6 +100,7 @@ def loss_function(
     lmbda: float = 1e-3,
     total_rate_nn_bit: float = 0.,
     compute_logs: bool = False,
+    rate_spatial_prior_map_bit: Dict[str, Optional[Tensor]] = None
 ) -> LossFunctionOutput:
     """Compute the loss and a few other quantities. The loss equation is:
 
@@ -146,7 +156,9 @@ def loss_function(
         n_pixels = decoded_image.get("y").size()[-2] * decoded_image.get("y").size()[-1]
 
     total_rate_latent_bit = torch.cat([v.sum().view(1) for _, v in rate_latent_bit.items()]).sum()
-    rate_bpp = total_rate_latent_bit + total_rate_nn_bit
+    total_rate_spatial_prior_map_bit = torch.cat([v.sum().view(1) for _, v in rate_spatial_prior_map_bit.items()]).sum()
+
+    rate_bpp = total_rate_latent_bit + total_rate_nn_bit + total_rate_spatial_prior_map_bit
     rate_bpp = rate_bpp / n_pixels
 
     loss = mse + lmbda * rate_bpp
@@ -154,11 +166,13 @@ def loss_function(
     # Construct the output module, only the loss is always returned
     rate_latent_bpp = None
     total_rate_nn_bpp = 0.
+    rate_spatial_prior_map_bpp = 0.
     if compute_logs:
         rate_latent_bpp = {
             k: v.detach().sum().item() / n_pixels
             for k, v in rate_latent_bit.items()
         }
+        rate_spatial_prior_map_bpp = total_rate_spatial_prior_map_bit / n_pixels
         total_rate_nn_bpp = total_rate_nn_bit / n_pixels
 
     output = LossFunctionOutput(
@@ -166,6 +180,7 @@ def loss_function(
         mse=mse.detach().item() if compute_logs else None,
         total_rate_nn_bpp=total_rate_nn_bpp,
         rate_latent_bpp=rate_latent_bpp,
+        rate_spatial_prior_map_bpp=rate_spatial_prior_map_bpp
     )
 
     return output

@@ -1,11 +1,15 @@
 /*
-    Software Name: Cool-Chic
+    Software Name: Cool-Chic / LANCE
     SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+    SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
     SPDX-License-Identifier: BSD 3-Clause "New"
 
     This software is distributed under the BSD-3-Clause license.
     Authors: see CONTRIBUTORS.md
 */
+
+#ifndef SYN_CPU_H
+#define SYN_CPU_H
 
 
 //void custom_conv_ks1_inX_outX(int KS, int32_t *kw, int32_t *kb, int h_in, int w_in, int stride_in, int plane_stride_in, int residue_origin_offset, int N_IN, int32_t *in, int N_OUT, int32_t *out, int residue, int relu);
@@ -31,3 +35,5 @@ template <typename P>
 void syn_blend1(int h_in, int w_in, int stride_in, int plane_stride_in, int N_INOUT, P *in, int32_t blend_val_in, P *out);
 template <typename P>
 void syn_blend2(int h_in, int w_in, int stride_in, int plane_stride_in, int N_INOUT, P *in, int32_t blend_val_in, P *out, int32_t blend_val_out);
+
+#endif // SYN_CPU_H

@@ -52,6 +52,8 @@ ext_modules = [
             "coolchic/cpp/BitStream.cpp",
             "coolchic/cpp/TDecBinCoderCABAC.cpp",
             "coolchic/cpp/Contexts.cpp",
+            "coolchic/cpp/resampler.cpp",
+            "coolchic/cpp/sparm_cpu.cpp",
         ],
         # Example: passing in the version to the compiled code
         define_macros=[("VERSION_INFO", __version__), ("CCDECAPI_CPU", "1")],
@@ -78,6 +80,8 @@ if platform != "darwin":
                 "coolchic/cpp/BitStream.cpp",
                 "coolchic/cpp/TDecBinCoderCABAC.cpp",
                 "coolchic/cpp/Contexts.cpp",
+                "coolchic/cpp/resampler.cpp",
+                "coolchic/cpp/sparm_cpu.cpp",
             ],
             # Example: passing in the version to the compiled code
             define_macros=[("VERSION_INFO", __version__), ("CCDECAPI_AVX2", "1")],
@@ -87,12 +91,12 @@ if platform != "darwin":
 
 # added netpbmfile import
 setup(
-    name="coolchic",
+    name="lance",
     version=__version__,
-    author="Orange",
-    author_email="theo.ladune@orange.com",
-    url="https://github.com/Orange-OpenSource/Cool-Chic",
-    description="Cool-Chic: lightweight neural video codec.",
+    author="Martin Benjak",
+    author_email="benjak@tnt.uni-hannover.de",
+    url="https://github.com/mbenjak/LANCE",
+    description="LANCE",
     long_description="",
     ext_modules=ext_modules,
     extras_require={},

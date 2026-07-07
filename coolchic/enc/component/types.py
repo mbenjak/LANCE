@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -26,6 +27,7 @@ class DescriptorCoolChic:
     arm: Optional[DescriptorNN] = None
     upsampling: Optional[DescriptorNN] = None
     synthesis: Optional[DescriptorNN] = None
+    sp_arm: Optional[DescriptorNN] = None
 
 
 # For now, it is only possible to have a Cool-chic encoder

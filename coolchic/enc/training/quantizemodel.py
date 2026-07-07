@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -51,9 +52,9 @@ def _quantize_parameters(
         sent_param = torch.round(v / current_q_step)
 
         if sent_param.abs().max() > MAX_AC_MAX_VAL:
-            #print(
-            #    f"Sent param {k} exceed MAX_AC_MAX_VAL! Q step {current_q_step} too small."
-            #)
+            print(
+                f"Sent param {k} exceed MAX_AC_MAX_VAL! Q step {current_q_step} too small."
+            )
             return None
 
         q_param[k] = sent_param * current_q_step
@@ -212,11 +213,12 @@ def quantize_model(
 
             loss_fn_output = loss_function(
                 frame_encoder_out.decoded_image,
-                frame_encoder_out.rate,
+                frame_encoder_out.latent_rate,
                 frame.data.data,
                 lmbda=frame_encoder_manager.lmbda,
                 rate_mlp_bit=rate_mlp,
                 compute_logs=True,
+                rate_spatial_prior_map_bit=frame_encoder_out.spatial_prior_map_rate,
             )
 
 

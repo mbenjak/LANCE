@@ -208,8 +208,8 @@ def pretty_string_nn(
             continue
 
         inside_box = f" {layer_name} "
-        if not is_non_linearity:
-            inside_box += f"{lay.in_channels} -> {lay.out_channels} "
+        #if not is_non_linearity:
+        #    inside_box += f"{lay.in_channels} -> {lay.out_channels} "
 
         if hasattr(lay, "kernel_size"):
             inside_box = f" {lay.kernel_size}x{lay.kernel_size}{inside_box}"

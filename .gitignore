@@ -18,5 +18,7 @@ test/out/
 venv/
 
 coolchic/CCLIB/
-coolchic.egg-info/
+lance.egg-info/
 *.so
+
+build/

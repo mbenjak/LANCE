@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -9,6 +10,7 @@
 
 import os
 import sys
+import time
 
 import configargparse
 from enc.component.coolchic import CoolChicEncoderParameter
@@ -27,6 +29,7 @@ from enc.utils.parsecli import (
 import torch
 
 if __name__ == "__main__":
+    start_time = time.time()
     # =========================== Parse arguments =========================== #
     # By increasing priority order, the arguments work as follows:
     #
@@ -204,6 +207,81 @@ if __name__ == "__main__":
     )
 
     parser.add(
+        "--arm_sparm_residue",
+        type=str,
+        default="3,1",
+        help="<context_size>,<number_of_hidden_layers> "
+        "ARM parameters for spatial hyperprior map encoding. "
+        "First number indicates the context size for spatial hyperprior ARM. "
+        "Second number indicates the number of hidden layer(s). 0 gives a linear ARM module. "
+        " Parameterize the residue decoder.",
+    )
+    parser.add(
+        "--arm_sparm_motion",
+        type=str,
+        default="3,1",
+        help="Identical to --arm_sparm_residue but for the motion decoder.",
+    )
+
+    parser.add(
+        "--spatial_prior_map_downsampling_residue",
+        type=int,
+        default=4,
+        help="Downsampling factor for the spatial hyperprior map for residue decoder. "
+        "Controls the resolution of the learnable spatial hyperprior map relative to the input image. "
+        "0 means same resolution as largest latent grid.",
+    )
+    parser.add(
+        "--spatial_prior_map_downsampling_motion",
+        type=int,
+        default=4,
+        help="Identical to --spatial_prior_map_downsampling_residue but for the motion decoder.",
+    )
+
+    parser.add(
+        "--spatial_prior_map_interpolation_mode_residue",
+        type=str,
+        default="bicubic",
+        choices=["bicubic", "area"],
+        help="Interpolation mode for the spatial hyperprior map for residue decoder.",
+    )
+    parser.add(
+        "--spatial_prior_map_interpolation_mode_motion",
+        type=str,
+        default="bicubic",
+        choices=["bicubic", "area"],
+        help="Identical to --spatial_prior_map_interpolation_mode_residue but for the motion decoder.",
+    )
+
+    parser.add(
+        "--spatial_prior_arm_conditions_residue",
+        type=str,
+        default="loco",
+        help="Comma-separated list of condition names to use for ARM spatial hyperprior conditioning for residue decoder.",
+    )
+    parser.add(
+        "--spatial_prior_arm_conditions_motion",
+        type=str,
+        default="loco",
+        help="Identical to --spatial_prior_arm_conditions_residue but for the motion decoder.",
+    )
+
+    parser.add(
+        "--arm_mod_layer_context_residue",
+        type=str,
+        default="concat",
+        choices=["none", "concat"],
+        help="If set to 'concat', a normalized layer index signal is concatenated to the spatial hyperprior features for ARM conditioning for residue decoder.",
+    )
+    parser.add(
+        "--arm_mod_layer_context_motion",
+        type=str,
+        default="concat",
+        choices=["none", "concat"],
+        help="Identical to --arm_mod_layer_context_residue but for the motion decoder.",
+    )
+
+    parser.add(
         "--n_ft_per_res_residue",
         type=str,
         default="1,1,1,1,1,1,1",
@@ -353,4 +431,5 @@ if __name__ == "__main__":
             frame_encoder, None, args.output, frame.display_order, hls_sig_blksize=16
         )
 
+    print(f"\nEncoding time: {time.time() - start_time:.2f} seconds")
     sys.exit(exit_code.value)

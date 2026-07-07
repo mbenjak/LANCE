@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -18,9 +19,12 @@ from dec.nn import decode_network
 from enc.bitstream.header import write_frame_header, write_gop_header, cc_latents_zero
 from CCLIB.ccencapi import cc_code_latent_layer_bac, cc_code_wb_bac
 from enc.bitstream.armint import ArmInt
+from enc.bitstream.spatialprior_interpolatorint import MultilayerInterpolatorInt
 from enc.component.core.synthesis import Synthesis
 from enc.component.core.upsampling import Upsampling
 from enc.component.frame import FrameEncoder
+import numpy as np
+from PIL import Image
 
 # Some constants here
 FIXED_POINT_FRACTIONAL_BITS = 8  # 8 works fine in pure int mode
@@ -64,7 +68,7 @@ def get_ac_max_val_nn(frame_encoder: FrameEncoder) -> int:
 
                 # Quantize the weight with the actual quantization step and add it
                 # to the list of (quantized) weights
-                if cur_module_name == "arm":
+                if cur_module_name == "arm" or cur_module_name == "sp_arm":
                     # to float, then qstep
                     model_param_quant.append(
                         torch.round((v/FIXED_POINT_FRACTIONAL_MULT) / cur_possible_q_step[cur_q_step_index]).flatten()
@@ -95,7 +99,7 @@ def get_ac_max_val_nn(frame_encoder: FrameEncoder) -> int:
                 )
                 # Quantize the bias with the actual quantization step and add it
                 # to the list of (quantized) bias
-                if cur_module_name == "arm":
+                if cur_module_name == "arm" or cur_module_name == "sp_arm":
                     # to float, then qstep
                     model_param_quant.append(
                         torch.round((v/FIXED_POINT_FRACTIONAL_MULT/FIXED_POINT_FRACTIONAL_MULT) / cur_possible_q_step[cur_q_step_index]).flatten()
@@ -213,6 +217,7 @@ def encode_frame(
     have_bias = { "arm": True,
                   "upsampling": False,
                   "synthesis": True,
+                  "sp_arm": True
                 }
 
     subprocess.call(f'rm -f {bitstream_path}', shell=True)
@@ -221,16 +226,44 @@ def encode_frame(
     # !!! no references for the moment.
 
     # Move to pure-int Arms.  Transfer the quantized weights from the fp Arms.
-    for cc_name, cc_enc in frame_encoder.coolchic_enc.items():
+    for cc_name, cc_enc in frame_encoder.coolchic_enc.items():            
         arm_fp_param = cc_enc.arm.get_param()
         arm_int = ArmInt(
             cc_enc.param.dim_arm,
             cc_enc.param.n_hidden_layers_arm,
+            1 + (1 if cc_enc.param.arm_mod_layer_context == "concat" else 0),
             FIXED_POINT_FRACTIONAL_MULT,
-            pure_int=True
+            pure_int=True,
         )
         cc_enc.arm = arm_int
         cc_enc.arm.set_param_from_float(arm_fp_param)
+
+        sp_arm_fp_param = cc_enc.sp_arm.get_param()
+        sp_arm_int = ArmInt(
+            cc_enc.param.dim_sparm,
+            cc_enc.param.n_hidden_layers_sparm,
+            0,
+            FIXED_POINT_FRACTIONAL_MULT,
+            pure_int=True,
+            dim_out = 2,
+            residual=True,
+            dim_hidden=cc_enc.param.dim_sparm
+        )
+        cc_enc.sp_arm = sp_arm_int
+        cc_enc.sp_arm.set_param_from_float(sp_arm_fp_param)
+
+    # Move to pure-int Bicubic interpolators for spatial prior
+    for cc_name, cc_enc in frame_encoder.coolchic_enc.items():   
+        if cc_enc.spatial_prior.bic_interpolator is None:
+            continue         
+        bicubic_int = MultilayerInterpolatorInt(
+            num_layers=cc_enc.spatial_prior.bic_interpolator.num_layers,
+            original_layer=cc_enc.spatial_prior.bic_interpolator.original_layer,
+            ext_fpfm=FIXED_POINT_FRACTIONAL_MULT,
+            pure_int=True,
+            latent_sizes=cc_enc.size_per_latent
+        )
+        cc_enc.spatial_prior.bic_interpolator = bicubic_int
 
     # ================= Encode the MLP into a bitstream file ================ #
     # ac_max_val_nn = get_ac_max_val_nn(frame_encoder)
@@ -239,6 +272,9 @@ def encode_frame(
     scale_index_nn: DescriptorCoolChic = {} # index with {cc_name}_{module_name}
     q_step_index_nn: DescriptorCoolChic = {} # index with {cc_name}_{module_name}
     n_bytes_nn: DescriptorCoolChic = {} # index with {cc_name}_{module_name}
+    
+    # Store spatial prior map information for encoding
+    spatial_prior_map_info = {}  # Store info about saptial prior maps per CC
 
     for cc_name, cc_enc in frame_encoder.coolchic_enc.items():
         for cur_module_name in cc_enc.modules_to_send:
@@ -255,8 +291,8 @@ def encode_frame(
             q_step_index_nn[index_name]['weight'] = -1
             q_step_index_nn[index_name]['bias'] = -1
             for k, v in module_to_encode.named_parameters():
-                assert cur_module_name in ['arm', 'synthesis', 'upsampling'], f'Unknown module name {cur_module_name}. '\
-                    'Module name should be in ["arm", "synthesis", "upsampling"].'
+                assert cur_module_name in ['arm', 'sp_arm', 'synthesis', 'upsampling'], f'Unknown module name {cur_module_name}. '\
+                    'Module name should be in ["arm", "sp_arm", "synthesis", "upsampling"].'
 
                 Q_STEPS = POSSIBLE_Q_STEP.get(cur_module_name)
 
@@ -275,7 +311,7 @@ def encode_frame(
 
                     # Quantize the weight with the actual quantization step and add it
                     # to the list of (quantized) weights
-                    if cur_module_name == "arm":
+                    if cur_module_name == "arm" or cur_module_name == "sp_arm":
                         # Our weights are stored as fixed point, we use shifts to get the integer values of quantized results.
                         # Our int vals are int(floatval << FPFBITS)
                         q_step_shift = abs(POSSIBLE_Q_STEP_SHIFT["arm"]["weight"][cur_q_step_index])
@@ -313,7 +349,7 @@ def encode_frame(
 
                     # Quantize the bias with the actual quantization step and add it
                     # to the list of (quantized) bias
-                    if cur_module_name == "arm":
+                    if cur_module_name == "arm" or cur_module_name == "sp_arm":
                         # Our biases are stored as fixed point, we use shifts to get the integer values of quantized results.
                         # Our int vals are int(floatval << FPFBITS << FPFBITS)
                         q_step_shift = abs(POSSIBLE_Q_STEP_SHIFT["arm"]["bias"][cur_q_step_index])
@@ -382,15 +418,27 @@ def encode_frame(
     for cc_name, cc_enc in frame_encoder.coolchic_enc.items():
         for cur_module_name in cc_enc.modules_to_send:
             index_name = f'{cc_name}_{cur_module_name}'
-            assert cur_module_name in ['arm', 'synthesis', 'upsampling'], f'Unknown module name {cur_module_name}. '\
-                'Module name should be in ["arm", "synthesis", "upsampling"].'
+            assert cur_module_name in ['arm', 'sp_arm', 'synthesis', 'upsampling'], f'Unknown module name {cur_module_name}. '\
+                'Module name should be in ["arm", "sp_arm", "synthesis", "upsampling"].'
 
-            if cur_module_name == 'arm':
+            if cur_module_name == 'arm':                    
                 empty_module = ArmInt(
                     cc_enc.param.dim_arm,
                     cc_enc.param.n_hidden_layers_arm,
+                    1 + (1 if cc_enc.param.arm_mod_layer_context == "concat" else 0),
                     FIXED_POINT_FRACTIONAL_MULT,
-                    pure_int = True
+                    pure_int=True,
+                )
+            if cur_module_name == 'sp_arm':                    
+                empty_module = ArmInt(
+                    cc_enc.param.dim_sparm,
+                    cc_enc.param.n_hidden_layers_sparm,
+                    0,
+                    FIXED_POINT_FRACTIONAL_MULT,
+                    pure_int=True,
+                    dim_out = 2,
+                    residual=True,
+                    dim_hidden=cc_enc.param.dim_sparm
                 )
             elif cur_module_name == 'synthesis':
                 empty_module =  Synthesis(
@@ -448,6 +496,51 @@ def encode_frame(
         AC_MAX_VAL=ac_max_val_latent,
         flag_additional_outputs=True,
     )
+
+    # =============== Encode spatial prior maps ============= #    
+    spatial_prior_map_bytes = {}  # Store spatial prior map sizes per CC
+    for cc_name, cc_enc in frame_encoder.coolchic_enc.items():
+        spatial_prior_map_bytes[cc_name] = 0
+        
+        # Get the spatial prior map and quantize it
+        spatial_prior_map = encoder_output.additional_data.get(f'{cc_name}detailed_sent_spatial_prior_map')
+        mu_spatial_prior_map = encoder_output.additional_data.get(f'{cc_name}detailed_spatial_prior_map_mu')
+        log_scale_spatial_prior_map = encoder_output.additional_data.get(f'{cc_name}detailed_spatial_prior_map_log_scale')
+        hls_test = -16
+
+        # Convert spatial prior map to image for visualization       
+        spatial_prior_map_2d = spatial_prior_map[0, 0].cpu().numpy()
+        spatial_prior_map_min = spatial_prior_map_2d.min()
+        spatial_prior_map_max = spatial_prior_map_2d.max()
+        if spatial_prior_map_max > spatial_prior_map_min:
+            spatial_prior_map_normalized = ((spatial_prior_map_2d - spatial_prior_map_min) / (spatial_prior_map_max - spatial_prior_map_min) * 255).astype(np.uint8)
+        else:
+            spatial_prior_map_normalized = np.zeros_like(spatial_prior_map_2d, dtype=np.uint8)
+        spatial_prior_map_image_path = f'./spatial_prior_map_{cc_name}.png'
+        Image.fromarray(spatial_prior_map_normalized, mode='L').save(spatial_prior_map_image_path)
+        print(f"  Saved spatial prior map image to: {spatial_prior_map_image_path}")
+
+        _, n_channels, h_i, w_i = spatial_prior_map.shape
+        assert n_channels == 1, "Only 1 channel is implemented for spatial prior maps."
+        
+        spatial_prior_map_bitstream = f'{bitstream_path}_{cc_name}_spatial_prior_map'
+        
+        cc_code_latent_layer_bac(
+            spatial_prior_map_bitstream,
+            spatial_prior_map.flatten().to(torch.int32).tolist(),
+            (mu_spatial_prior_map*FIXED_POINT_FRACTIONAL_MULT).round().flatten().to(torch.int32).tolist(),
+            (log_scale_spatial_prior_map*FIXED_POINT_FRACTIONAL_MULT).round().flatten().to(torch.int32).tolist(),
+            h_i, w_i,
+            hls_test,
+        )
+        spatial_prior_map_bytes[cc_name] = os.path.getsize(spatial_prior_map_bitstream)
+        spatial_prior_map_info[cc_name] = {
+            'size': spatial_prior_map_bytes[cc_name],
+            'shape': spatial_prior_map.shape
+        }
+        
+        print(f"Encoded {cc_name} spatial prior map: {spatial_prior_map_bytes[cc_name]} bytes")
+    # =============== Encode spatial prior maps ============= #
 
     # Encode the different 2d latent grids one after the other
     n_bytes_per_latent = {} # index by cc_name to get list.
@@ -570,6 +663,7 @@ def encode_frame(
         scale_index_nn,
         n_bytes_nn,
         hls_blk_sizes,
+        spatial_prior_map_info,
     )
 
     # Concatenate everything inside a single file
@@ -584,7 +678,8 @@ def encode_frame(
     for cc_name, cc_enc in frame_encoder.coolchic_enc.items():
         latents_zero = cc_latents_zero(cc_enc, n_bytes_per_latent[cc_name])
         print("latents_zero", latents_zero)
-        for cur_module_name in ['arm', 'upsampling', 'synthesis']:
+        
+        for cur_module_name in ['arm', 'sp_arm', 'upsampling', 'synthesis']:
             for parameter_type in ['weight', 'bias']:
                 cur_bitstream = f'{bitstream_path}_{cc_name}_{cur_module_name}_{parameter_type}'
                 if os.path.exists(cur_bitstream):
@@ -593,6 +688,16 @@ def encode_frame(
                     else:
                         subprocess.call(f'cat {cur_bitstream} >> {bitstream_path}', shell=True)
                     subprocess.call(f'rm -f {cur_bitstream}', shell=True)
+
+        if spatial_prior_map_info[cc_name] is not None:
+            spatial_prior_map_context_bitstream = f'{bitstream_path}_{cc_name}_spatial_prior_map_context'
+            if os.path.exists(spatial_prior_map_context_bitstream):
+                subprocess.call(f'cat {spatial_prior_map_context_bitstream} >> {bitstream_path}', shell=True)
+                subprocess.call(f'rm -f {spatial_prior_map_context_bitstream}', shell=True)
+            spatial_prior_map_bitstream = f'{bitstream_path}_{cc_name}_spatial_prior_map'
+            if os.path.exists(spatial_prior_map_bitstream):
+                subprocess.call(f'cat {spatial_prior_map_bitstream} >> {bitstream_path}', shell=True)
+                subprocess.call(f'rm -f {spatial_prior_map_bitstream}', shell=True)
 
         ctr_2d_ft = 0
         for index_lat_resolution in range(cc_enc.param.latent_n_grids):
@@ -611,6 +716,70 @@ def encode_frame(
                     subprocess.call(f'cat {cur_latent_bitstream} >> {bitstream_path}', shell=True)
                 subprocess.call(f'rm -f {cur_latent_bitstream}', shell=True)
                 ctr_2d_ft += 1
+
+    # Print module sizes summary
+    print("\n" + "="*60)
+    print("MODULE SIZES SUMMARY")
+    print("="*60)
+    
+    total_nn_bytes = 0
+    total_latent_bytes = 0
+    total_spatial_prior_map_bytes = 0
+    
+    # Print neural network module sizes
+    for cc_name, cc_enc in frame_encoder.coolchic_enc.items():
+        print(f"\n{cc_name.upper()} NEURAL NETWORK MODULES:")
+        cc_total_bytes = 0
+        
+        for cur_module_name in cc_enc.modules_to_send:
+            index_name = f'{cc_name}_{cur_module_name}'
+            module_bytes = n_bytes_nn[index_name]['weight'] + n_bytes_nn[index_name]['bias']
+            cc_total_bytes += module_bytes
+            print(f"  {cur_module_name:12s}: {module_bytes:8d} bytes ({module_bytes/1000:7.3f} kB)")
+            print(f"    - weight:     {n_bytes_nn[index_name]['weight']:8d} bytes")
+            print(f"    - bias:       {n_bytes_nn[index_name]['bias']:8d} bytes")
+        
+        print(f"  {'TOTAL':12s}: {cc_total_bytes:8d} bytes ({cc_total_bytes/1000:7.3f} kB)")
+        total_nn_bytes += cc_total_bytes
+        
+        if spatial_prior_map_info[cc_name] is not None:
+            spatial_prior_map_size = spatial_prior_map_info[cc_name]['size']
+            total_spatial_prior_map_bytes += spatial_prior_map_size
+            print(f"\n{cc_name.upper()} SPATIAL PRIOR MAP:")
+            print(f"  spatial_prior_map:     {spatial_prior_map_size:8d} bytes ({spatial_prior_map_size/1000:7.3f} kB)")
+            shape = spatial_prior_map_info[cc_name]['shape']
+            print(f"    - shape:      {shape}")
+            #print(f"    - context: {sp_context_bytes:8d} bytes ({sp_context_bytes/1000:7.3f} kB)")
+            #print(f"     - context columb count: {sp_context_exgolomb_count}")
+        
+        # Print latent sizes for this CC
+        print(f"\n{cc_name.upper()} LATENT VARIABLES:")
+        cc_latent_bytes = sum(n_bytes_per_latent[cc_name])
+        total_latent_bytes += cc_latent_bytes
+        print(f"  Total latents: {cc_latent_bytes:8d} bytes ({cc_latent_bytes/1000:7.3f} kB)")
+        if len(n_bytes_per_latent[cc_name]) > 1:
+            for i, lat_bytes in enumerate(n_bytes_per_latent[cc_name]):
+                print(f"    - latent {i:2d}: {lat_bytes:8d} bytes")
+    
+    # Print overall summary
+    print(f"\n{'='*60}")
+    print(f"OVERALL SUMMARY:")
+    print(f"{'='*60}")
+    print(f"Total NN modules:     {total_nn_bytes:8d} bytes ({total_nn_bytes/1000:7.3f} kB)")
+    if total_spatial_prior_map_bytes > 0:
+        print(f"Total spatial prior maps:     {total_spatial_prior_map_bytes:8d} bytes ({(total_spatial_prior_map_bytes)/1000:7.3f} kB)")
+    print(f"Total latents:        {total_latent_bytes:8d} bytes ({total_latent_bytes/1000:7.3f} kB)")
+    total_bytes = total_nn_bytes + total_spatial_prior_map_bytes + total_latent_bytes
+    print(f"Total bitstream:      {total_bytes:8d} bytes ({total_bytes/1000:7.3f} kB)")
+    
+    # Get actual file size for verification
+    if os.path.exists(bitstream_path):
+        actual_size = os.path.getsize(bitstream_path)
+        print(f"Actual file size:     {actual_size:8d} bytes ({actual_size/1000:7.3f} kB)")
+        if actual_size != total_bytes:
+            print(f"Size difference:      {actual_size - total_bytes:8d} bytes (header overhead)")
+    
+    print("="*60)
 
     # Encoding's done, we no longer need deterministic algorithms
     torch.use_deterministic_algorithms(False)

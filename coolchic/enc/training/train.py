@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -278,11 +279,12 @@ def train(
 
         loss_function_output = loss_function(
             decoded_image=decoded_image,
-            rate_latent_bit=out_forward.rate,
+            rate_latent_bit=out_forward.latent_rate,
             target_image=target_image,
             lmbda=lmbda,
             total_rate_nn_bit=0.0,
             compute_logs=False,
+            rate_spatial_prior_map_bit=out_forward.spatial_prior_map_rate,
         )
         loss_function_output.loss.backward()
         clip_grad_norm_(all_parameters, 1e-1, norm_type=2.0, error_if_nonfinite=False)

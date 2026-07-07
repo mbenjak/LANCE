@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -24,6 +25,10 @@ POSSIBLE_Q_STEP_SHIFT = {
 
 POSSIBLE_Q_STEP = {
     "arm": {
+        "weight": 2.0 ** POSSIBLE_Q_STEP_SHIFT["arm"]["weight"],
+        "bias": 2.0 ** POSSIBLE_Q_STEP_SHIFT["arm"]["bias"],
+    },
+    "sp_arm": {
         "weight": 2.0 ** POSSIBLE_Q_STEP_SHIFT["arm"]["weight"],
         "bias": 2.0 ** POSSIBLE_Q_STEP_SHIFT["arm"]["bias"],
     },

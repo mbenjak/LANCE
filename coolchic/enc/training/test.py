@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -363,6 +364,7 @@ class FrameEncoderLogs(LossFunctionOutput):
             "psnr_db": ["short", "all"],
             "total_rate_bpp": ["short", "all"],
             "total_rate_latent_bpp": ["short", "all"],
+            "total_rate_spatial_prior_map_bpp": ["short", "all"],
             "total_rate_nn_bpp": ["short", "all"],
             "encoding_time_second": ["short", "all"],
             "encoding_iterations_cnt": ["short", "all"],
@@ -443,6 +445,7 @@ class FrameEncoderLogs(LossFunctionOutput):
         # Syntax: {'long_name': 'short_name'}
         LONG_TO_SHORT = {
             "total_rate_latent_bpp": "latent_bpp",
+            "total_rate_spatial_prior_map_bpp": "sp_bpp",
             "total_rate_nn_bpp": "nn_bpp",
             "total_rate_bpp": "rate_bpp",
             "encoding_time_second": "time_sec",
@@ -503,11 +506,12 @@ def test(
 
     loss_fn_output = loss_function(
         frame_encoder_out.decoded_image,
-        frame_encoder_out.rate,
+        frame_encoder_out.latent_rate,
         frame.data.data,
         lmbda=frame_encoder_manager.lmbda,
         total_rate_nn_bit=total_rate_nn_bit,
         compute_logs=True,
+        rate_spatial_prior_map_bit=frame_encoder_out.spatial_prior_map_rate,
     )
 
     encoder_logs = FrameEncoderLogs(

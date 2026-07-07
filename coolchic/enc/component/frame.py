@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -50,6 +51,8 @@ class FrameEncoderOutput:
 
     # Rate associated to each cool-chic encoder
     rate: Dict[NAME_COOLCHIC_ENC, Tensor]
+    spatial_prior_map_rate: Dict[NAME_COOLCHIC_ENC, Tensor]
+    latent_rate: Dict[NAME_COOLCHIC_ENC, Tensor]
 
     # Any other data required to compute some logs, stored inside a dictionary
     additional_data: Dict[str, Any] = field(default_factory=lambda: {})
@@ -208,6 +211,16 @@ class FrameEncoder(nn.Module):
             for cc_name, cc_enc_out_i in cc_enc_out.items()
         }
 
+        latent_rate = {
+            cc_name: cc_enc_out_i.get("latent_rate")
+            for cc_name, cc_enc_out_i in cc_enc_out.items()
+        }
+
+        spatial_prior_map_rate = {
+            cc_name: cc_enc_out_i.get("spatial_prior_map_rate")
+            for cc_name, cc_enc_out_i in cc_enc_out.items()
+        }
+
         if self.frame_type == "I":
             decoded_image = cc_enc_out["residue"].get("raw_out")
 
@@ -276,6 +289,8 @@ class FrameEncoder(nn.Module):
             decoded_image=decoded_image,
             rate=rate,
             additional_data=additional_data,
+            spatial_prior_map_rate=spatial_prior_map_rate,
+            latent_rate=latent_rate,
         )
 
         return results

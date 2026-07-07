@@ -1,3 +1,5 @@
+#ifndef FRAME_MEMORY_H
+#define FRAME_MEMORY_H
 
 #include "common.h"
 
@@ -75,3 +77,5 @@ public:
     void zero_pad(int plane, int pad);
     void zero_plane_content(int plane);
 };
+
+#endif //FRAME_MEMORY_H

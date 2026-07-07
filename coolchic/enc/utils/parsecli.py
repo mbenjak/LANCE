@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -53,6 +54,25 @@ def _parse_arm_archi(arm: str) -> Dict[str, int]:
     return arm_param
 
 
+def _parse_arm_sparm_archi(arm_sparm: str) -> Dict[str, int]:
+    """The arm_sparm is described as <context_size>,<n_hidden_layers_sparm>.
+    Split up this string to return the value as a dict.
+
+    Args:
+        arm_sparm (str): Command line argument for the spatial prior ARM.
+
+    Returns:
+        Dict[str, int]: The spatial prior ARM architecture
+    """
+    assert len(arm_sparm.split(",")) == 2, f"--arm_sparm format should be X,Y." f" Found {arm_sparm}"
+
+    context_size, n_hidden_layers_sparm = [int(x) for x in arm_sparm.split(",")]
+    #assert context_size == 3, f"Spatial prior ARM context size should be 3. Found {context_size}"
+    arm_sparm_param = {"n_hidden_layers_sparm": n_hidden_layers_sparm,
+                       "dim_sparm": context_size}
+    return arm_sparm_param
+
+
 def _parse_n_ft_per_res(n_ft_per_res: str) -> List[int]:
     """The number of feature per resolution is a coma-separated string.
     This simply splits up the different substrings and return them.
@@ -91,10 +111,17 @@ def get_coolchic_param_from_args(
         "ups_preconcat_k_size": getattr(
             args, f"ups_preconcat_k_size_{coolchic_enc_name}"
         ),
+        "spatial_prior_map_downsampling": getattr(args, f"spatial_prior_map_downsampling_{coolchic_enc_name}"),
+        "spatial_prior_map_interpolation_mode": getattr(args, f"spatial_prior_map_interpolation_mode_{coolchic_enc_name}"),
+        "arm_mod_layer_context": getattr(args, f"arm_mod_layer_context_{coolchic_enc_name}"),
+        "spatial_prior_arm_conditions": getattr(args, f"spatial_prior_arm_conditions_{coolchic_enc_name}").split(','),
     }
 
     # Add ARM parameters
     coolchic_param.update(_parse_arm_archi(getattr(args, f"arm_{coolchic_enc_name}")))
+    
+    # Add spatial prior ARM parameters
+    coolchic_param.update(_parse_arm_sparm_archi(getattr(args, f"arm_sparm_{coolchic_enc_name}")))
 
     return coolchic_param
 

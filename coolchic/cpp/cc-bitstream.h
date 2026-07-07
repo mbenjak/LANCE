@@ -1,12 +1,15 @@
 /*
-    Software Name: Cool-Chic
+    Software Name: Cool-Chic / LANCE
     SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+    SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
     SPDX-License-Identifier: BSD 3-Clause "New"
 
     This software is distributed under the BSD-3-Clause license.
     Authors: see CONTRIBUTORS.md
 */
 
+#ifndef CC_BITSTREAM_H
+#define CC_BITSTREAM_H
 
 /*
  * bitstream reading.
@@ -41,11 +44,23 @@ struct cc_bs_layer_quant_info
     int n_bytes_nn_bias;
 };
 
+struct cc_bs_spatial_prior_module_info
+{
+    int dim_sparm;
+    int n_hidden_sparm;
+    int downsampling_factor;
+    int map_size;
+    bool layer_id_context; // if true, layerid is concatenated too
+    constexpr static int n_prediction_context = 3; 
+};
+
 struct cc_bs_frame_coolchic
 {
     bool latents_zero;
     int n_hidden_layers_arm;
     int dim_arm;
+
+    struct cc_bs_spatial_prior_module_info spatial_prior;
 
     int  n_ups_kernel;
     int  ups_k_size;
@@ -55,6 +70,7 @@ struct cc_bs_frame_coolchic
     int n_syn_layers;
     std::vector<struct cc_bs_syn_layer> layers_synthesis;
     struct cc_bs_layer_quant_info arm_lqi;
+    struct cc_bs_layer_quant_info sparm_lqi;
     struct cc_bs_layer_quant_info ups_lqi;
     struct cc_bs_layer_quant_info syn_lqi;
 
@@ -68,10 +84,13 @@ struct cc_bs_frame_coolchic
     // weights, biases and latents.  BAC coded.
     std::vector<unsigned char> m_arm_weights_hevc;
     std::vector<unsigned char> m_arm_biases_hevc;
+    std::vector<unsigned char> m_sparm_weights_hevc;
+    std::vector<unsigned char> m_sparm_biases_hevc;
     std::vector<unsigned char> m_ups_weights_hevc; // both lb and hb
     std::vector<unsigned char> m_ups_biases_hevc; // both lb and hb
     std::vector<unsigned char> m_syn_weights_hevc; // all branches
     std::vector<unsigned char> m_syn_biases_hevc; // all branches
+    std::vector<unsigned char> m_spatial_prior_map_hevc;
     std::vector<std::vector<unsigned char>> m_latents_hevc;
 
 public:
@@ -84,6 +103,7 @@ public:
 #define TOP_COPY_UPS 1
 #define TOP_COPY_SYN 2
 #define TOP_COPY_LAT 3
+#define TOP_COPY_SPATIAL_PRIOR 4
 
 struct cc_bs_frame_header
 {
@@ -116,3 +136,5 @@ public:
 private:
     FILE *m_f;
 };
+
+#endif // CC_BITSTREAM_H

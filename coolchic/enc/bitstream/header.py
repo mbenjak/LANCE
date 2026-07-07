@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -87,7 +88,7 @@ Header for the frame (one by frame):
 """
 
 import os
-from typing import List, Tuple, TypedDict
+from typing import Dict, List, Tuple, TypedDict
 
 from enc.component.core.synthesis import Synthesis
 from enc.component.frame import FrameEncoder
@@ -375,25 +376,28 @@ def cc_topologies_equal(cc_enc_1, cc_enc_2):
     if cc_enc_1.param.latent_n_grids == cc_enc_2.param.latent_n_grids \
         and cc_enc_1.param.n_ft_per_res == cc_enc_2.param.n_ft_per_res: # list comparison
         result |= (1<<3)
+    if cc_enc_1.param.dim_sparm == cc_enc_2.param.dim_sparm \
+        and cc_enc_1.param.n_hidden_layers_sparm == cc_enc_2.param.n_hidden_layers_sparm \
+        and cc_enc_1.param.arm_mod_layer_context == cc_enc_2.param.arm_mod_layer_context:
+        result |= (1<<4)
 
     #print("returning 0x%x"%(result))
     return result
 
 def code_cc_topology(cc_enc, topologies_equal_bits):
     byte_to_write = b""
-
     # Since the dimension of the hidden layer and of the context is always a multiple of
     # 8, we can spare 3 bits by dividing it by 8
     assert cc_enc.param.dim_arm // 8 < 2**4, (
         f"Number of context pixels"
         f" and dimension of the hidden layer for the arm must be inferior to {2 ** 4 * 8}. Found"
-        f" {cc_enc.dim_arm} in encoder {cc_name}"
+        f" {cc_enc.param.dim_arm}"
     )
 
     assert cc_enc.param.n_hidden_layers_arm < 2**4, (
         f"Number of hidden layers"
         f" for the ARM should be inferior to {2 ** 4}. Found "
-        f"{cc_enc.n_hidden_layers_arm} in {cc_name}"
+        f"{cc_enc.param.n_hidden_layers_arm}"
     )
 
     if (topologies_equal_bits&(1<<0)) == 0:
@@ -433,11 +437,32 @@ def code_cc_topology(cc_enc, topologies_equal_bits):
         for i, latent_i in enumerate(cc_enc.latent_grids):
             n_ft_i = latent_i.size()[1]
             if n_ft_i > 2**8 - 1:
-                print(f"Number of feature maps for latent {i} is too big in {cc_name}!")
+                print(f"Number of feature maps for latent {i} is too big!")
                 print(f"Found {n_ft_i}, should be smaller than {2 ** 8 - 1}")
                 print("Exiting!")
                 return
             byte_to_write += n_ft_i.to_bytes(1, byteorder="big", signed=False)
+
+    if (topologies_equal_bits&(1<<4)) == 0:
+        assert cc_enc.param.dim_sparm in [3, 5], (
+            f"dim_sparm should be either 3 or 5. Found "
+            f"{cc_enc.param.dim_sparm}"
+        )
+        assert 0 <= cc_enc.param.n_hidden_layers_sparm <= 3, (
+            f"n_hidden_layers_sparm should be less than 4. Found "
+            f"{cc_enc.param.n_hidden_layers_sparm}"
+        )
+        assert 0 <=cc_enc.param.spatial_prior_map_downsampling < 2**4, (
+            f"spatial_prior_map_downsampling must be smaller than to {2 ** 4}. Found "
+            f"{cc_enc.param.spatial_prior_map_downsampling}"
+        )
+
+        byte_to_write += (
+            (0 if cc_enc.param.dim_sparm == 3 else 1) \
+            | (cc_enc.param.n_hidden_layers_sparm << 1) \
+            | ((1 if cc_enc.param.arm_mod_layer_context == "concat" else 0) << 3) \
+            | (cc_enc.param.spatial_prior_map_downsampling << 4)
+        ).to_bytes(1, byteorder="big", signed=False)
 
     return byte_to_write
 
@@ -459,6 +484,7 @@ def write_frame_header(
     scale_index_nn: DescriptorCoolChic,
     n_bytes_nn: DescriptorCoolChic,
     hls_sig_blksize: List[int],
+    spatial_prior_map_info: Dict = None,
 ):
     """Write a frame header to a a file located at <header_path>.
     The structure of the header is described above.
@@ -505,8 +531,8 @@ def write_frame_header(
         # frame-type(2), latz0(1).
         byte_to_write += ((frame_type_bits)|(cc_latz_bits[0]<<2)).to_bytes(1, byteorder="big", signed=False)
     else:
-        # frame_type(2), latz0(1), cceq0(4)
-        # latz1(1), cceq1(4)
+        # frame_type(2), latz0(1), cceq0(5)
+        # latz1(1), cceq1(5)
         byte_to_write += ((frame_type_bits)|(cc_latz_bits[0]<<2)|(cc_eq_bits[0]<<3)).to_bytes(1, byteorder="big", signed=False)
         byte_to_write += ((cc_latz_bits[1])|(cc_eq_bits[1]<<1)).to_bytes(1, byteorder="big", signed=False)
 
@@ -532,9 +558,9 @@ def write_frame_header(
 
         latents_zero = cc_latents_zero(cc_enc, n_bytes_per_latent[cc_name])
         if latents_zero: # no upsampling if latents are all zero.
-            modules = ["arm", "synthesis"]
+            modules = ["arm", "sp_arm", "synthesis"]
         else:
-            modules = ["arm", "upsampling", "synthesis"]
+            modules = ["arm", "sp_arm","upsampling", "synthesis"]
 
         for nn_name in modules:
             index_name = f'{cc_name}_{nn_name}'
@@ -563,6 +589,11 @@ def write_frame_header(
                 if n_ft_i > 0:
                     byte_to_write += utf_code(v)
 
+        if spatial_prior_map_info is not None:
+            for cc_name, sp_info in spatial_prior_map_info.items():
+                if sp_info is not None:
+                    byte_to_write += utf_code(sp_info["size"])
+        
         cc_idx += 1
 
     # Get and write the header length.

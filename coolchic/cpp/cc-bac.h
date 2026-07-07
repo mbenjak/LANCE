@@ -1,4 +1,11 @@
 
+#ifndef CC_BAC_H
+#define CC_BAC_H
+
+#include "TDecBinCoderCABAC.h"
+#include "cc-contexts.h"
+#include <cstring>  // for memset
+
 // cool chic BAC context and some helper functions.  inlined.
 class BACContext {
 public:
@@ -255,3 +262,4 @@ int32_t decode_latent_layer_bac_single(
    return val_mu_rounded+decode_single(layer_BAC, coding_ctxs);
 }
 
+#endif

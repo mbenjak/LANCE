@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -57,6 +58,7 @@ class ArmIntLinear(nn.Module):
         self.fpfm = fpfm
         self.pure_int = pure_int
         self.residual = residual
+        self.out_channels = out_channels
 
         # -------- Instantiate empty parameters, set by a later load
         if self.pure_int:
@@ -87,7 +89,7 @@ class ArmIntLinear(nn.Module):
             Tensor with shape :math:`[B, C_{out}]`.
         """
         if self.residual:
-            xx = F.linear(x, self.weight, bias=self.bias) + x * self.fpfm
+            xx = F.linear(x, self.weight, bias=self.bias) + x[:,:self.out_channels] * self.fpfm
         else:
             xx = F.linear(x, self.weight, bias=self.bias)
 
@@ -150,7 +152,7 @@ class ArmInt(nn.Module):
     """
 
     def __init__(
-        self, dim_arm: int, n_hidden_layers_arm: int, fpfm: int, pure_int: bool
+        self, dim_arm: int, n_hidden_layers_arm: int, dim_sp_context: int, fpfm: int, pure_int: bool, dim_out: int = 2, residual: bool = True, dim_hidden = None
     ):
         """
         Args:
@@ -158,30 +160,37 @@ class ArmInt(nn.Module):
                 layers :math:`C`.
             n_hidden_layers_arm: Number of hidden layers. Set it to 0 for
                 a linear ARM.
+            dim_sp_context: Dimension of the spatial prior context to be
+                concatenated to the pixel context.
         """
         super().__init__()
 
-        assert dim_arm % 8 == 0, (
-            f"ARM context size and hidden layer dimension must be "
-            f"a multiple of 8. Found {dim_arm}."
-        )
+        #assert dim_arm % 8 == 0, (
+        #    f"ARM context size and hidden layer dimension must be "
+        #    f"a multiple of 8. Found {dim_arm}."
+        #)
 
         self.FPFM = fpfm  # fixed-point: multiplication to get int.
         self.pure_int = pure_int  # weights and biases are actual int (cpu only), or just int values in floats (gpu friendly).
 
+        self.dim_out = dim_out
         # ======================== Construct the MLP ======================== #
         layers_list = nn.ModuleList()
 
         # Construct the hidden layer(s)
         for i in range(n_hidden_layers_arm):
+            if i == 0:
+                in_dim = dim_arm + dim_sp_context
+            else:
+                in_dim = dim_hidden if dim_hidden is not None else dim_arm
             layers_list.append(
-                ArmIntLinear(dim_arm, dim_arm, self.FPFM, self.pure_int, residual=True)
+                ArmIntLinear(in_dim, dim_hidden if dim_hidden is not None else dim_arm, self.FPFM, self.pure_int, residual=residual)
             )
             layers_list.append(nn.ReLU())
 
         # Construct the output layer. It always has 2 outputs (mu and scale)
         layers_list.append(
-            ArmIntLinear(dim_arm, 2, self.FPFM, self.pure_int, residual=False)
+            ArmIntLinear(dim_hidden if dim_hidden is not None else dim_arm, dim_out, self.FPFM, self.pure_int, residual=False)
         )
         self.mlp = nn.Sequential(*layers_list)
         # ======================== Construct the MLP ======================== #
@@ -251,13 +260,16 @@ class ArmInt(nn.Module):
         # float the result.
         raw_proba_param = xint / self.FPFM
 
-        mu = raw_proba_param[:, 0]
-        log_scale = raw_proba_param[:, 1]
+        if self.dim_out == 2:
+            mu = raw_proba_param[:, 0]
+            log_scale = raw_proba_param[:, 1]
 
-        # no scale smaller than exp(-4.6) = 1e-2 or bigger than exp(5.01) = 150
-        scale = torch.exp(torch.clamp(log_scale - 4, min=-4.6, max=5.0))
+            # no scale smaller than exp(-4.6) = 1e-2 or bigger than exp(5.01) = 150
+            scale = torch.exp(torch.clamp(log_scale - 4, min=-4.6, max=5.0))
 
-        return mu, scale, log_scale
+            return mu, scale, log_scale
+        else:
+            return raw_proba_param
 
     def get_param(self) -> OrderedDict[str, Tensor]:
         """Return **a copy** of the weights and biases inside the module.

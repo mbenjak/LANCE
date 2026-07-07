@@ -1,3 +1,5 @@
+#ifndef COMMON_AVX2_H
+#define COMMON_AVX2_H
 
 // Used by arm_avx2 and syn_avx2.
 
@@ -27,4 +29,6 @@ static inline float horizontal_add (__m256 a) {
     __m128 t4 = _mm_add_ss(_mm256_castps256_ps128(t2),t3);
     return _mm_cvtss_f32(t4);
 }
+
+#endif // COMMON_AVX2_H
 

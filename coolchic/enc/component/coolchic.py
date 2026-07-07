@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -32,6 +33,7 @@ from enc.component.core.quantizer import (
 )
 from enc.component.core.synthesis import Synthesis
 from enc.component.core.upsampling import Upsampling
+from enc.component.core.spatialprior import SpatialPrior
 
 from enc.utils.device import POSSIBLE_DEVICE
 
@@ -77,6 +79,24 @@ class CoolChicEncoderParameter:
         encoder_gain (int, Optional): Multiply the latent by this value before
             quantization. See the documentation of Cool-chic forward pass.
             Defaults to 16.
+        spatial_prior_n_channels (int, Optional): Number of channels for spatial prior 
+            embeddings. Defaults to 32.
+        dim_mod_arm (int, Optional): Hidden layer dimension for the modulation 
+            part of the ARM. Defaults to 2.
+        n_hidden_mod_arm (int, Optional): Number of hidden layers for the modulation
+            part of the ARM. Defaults to 1.
+        spatial_prior_map_downsampling (int, Optional): Downsampling factor for the spatial prior
+            map when using 'map' mode. Controls the resolution of the learnable spatial prior
+            map relative to the input image. Defaults to 0 (same resolution as largest
+            latent grid).
+        spatial_prior_map_interpolation_mode (str, Optional): Interpolation mode for the 
+            spatial prior map to match latent grid sizes when using 'map' mode. 
+            Defaults to 'bicubic'.
+        arm_mod_layer_context (str, Optional): Whether to concatenate layer signals to 
+            spatial prior features for ARM conditioning. Defaults to 'concat'.
+        n_hidden_layers_sparm (int, Optional): Number of hidden layers in the
+            spatial prior ARM. Set ``n_hidden_layers_sparm = 0`` for a linear spatial 
+            prior ARM. Defaults to 2.
     """
 
     layers_synthesis: List[str]
@@ -86,6 +106,13 @@ class CoolChicEncoderParameter:
     encoder_gain: int = 16
     ups_k_size: int = 8
     ups_preconcat_k_size: int = 7
+    spatial_prior_n_channels: int = 1
+    spatial_prior_map_downsampling: int = 0
+    spatial_prior_map_interpolation_mode: str = "bicubic"
+    arm_mod_layer_context: str = "concat"
+    n_hidden_layers_sparm: int = 2
+    dim_sparm: int = 3
+    spatial_prior_arm_conditions: List[str] = field(default_factory=list)
 
     # ==================== Not set by the init function ===================== #
     #: Automatically computed, number of different latent resolutions
@@ -144,6 +171,8 @@ class CoolChicEncoderOutput(TypedDict):
     raw_out: Tensor
     rate: Tensor
     additional_data: Dict[str, Any]
+    spatial_prior_map_rate: Tensor
+    latent_rate: Tensor
 
 
 class CoolChicEncoder(nn.Module):
@@ -190,6 +219,18 @@ class CoolChicEncoder(nn.Module):
             )
 
         self.initialize_latent_grids()
+        
+        self.spatial_prior = SpatialPrior(
+            spatial_prior_n_channels=self.param.spatial_prior_n_channels,
+            img_size=self.param.img_size,
+            spatial_prior_map_downsampling=self.param.spatial_prior_map_downsampling,
+            spatial_prior_map_interpolation_mode=self.param.spatial_prior_map_interpolation_mode,
+            arm_mod_layer_context=self.param.arm_mod_layer_context,
+            n_latents=self.param.latent_n_grids,
+            spatial_prior_arm_conditions=self.param.spatial_prior_arm_conditions,
+            latent_sizes=self.size_per_latent
+        )
+
 
         # Instantiate the synthesis MLP with as many inputs as the number
         # of latent channels
@@ -251,7 +292,28 @@ class CoolChicEncoder(nn.Module):
             persistent=False,
         )
 
-        self.arm = Arm(self.param.dim_arm, self.param.n_hidden_layers_arm)
+        self.register_buffer(
+            "sp_non_zero_pixel_ctx_index",
+            #torch.tensor([0,1,3]),
+            _get_non_zero_pixel_ctx_index(self.param.dim_sparm),
+            persistent=False,
+        )
+        
+        self.arm = Arm(
+            self.param.dim_arm, 
+            self.param.n_hidden_layers_arm,
+            1 + (1 if self.param.arm_mod_layer_context == "concat" else 0)
+        )
+
+        self.sp_arm = Arm(
+            self.param.dim_sparm, 
+            self.param.n_hidden_layers_sparm,
+            0,
+            dim_out = 2,
+            residual=True,
+            dim_hidden=self.param.dim_sparm,
+            zero_init=False
+        )
         # ===================== ARM related stuff ==================== #
 
         # Something like ['arm', 'synthesis', 'upsampling']
@@ -263,8 +325,11 @@ class CoolChicEncoder(nn.Module):
         # Total number of multiplications to decode the image
         self.total_flops = 0.0
         self.flops_per_module = {k: 0 for k in self.modules_to_send}
-        # Fill the two attributes aboves
-        self.get_flops()
+        if self.spatial_prior.bic_interpolator is not None:
+            self.flops_per_module["spatial_prior.bic_interpolator"] = 0
+        # Fill the two attributes aboves (skip if in testing mode)
+        if not getattr(self, '_skip_flops', False):
+            self.get_flops()
         # ======================== Monitoring ======================== #
 
 
@@ -392,8 +457,8 @@ class CoolChicEncoder(nn.Module):
         # flat_latent: [N, 1] tensor describing N latents
         # flat_context: [N, context_size] tensor describing each latent context
 
-        # Get all the context as a single 2D vector of size [B, context size]
-        flat_context = torch.cat(
+        # Get all the spatial context as a single 2D vector of size [B, context size]
+        flat_spatial_context = torch.cat(
             [
                 _get_neighbor(
                     spatial_latent_i, self.mask_size, self.non_zero_pixel_ctx_index
@@ -403,14 +468,28 @@ class CoolChicEncoder(nn.Module):
             dim=0,
         )
 
+        # Use spatial prior to quantize, compute residuals, scales, and rates
+        quantized_spatial_prior_map, condition = self.spatial_prior(
+            self.encoder_gains,
+            quantizer_noise_type,
+            quantizer_type,
+            soft_round_temperature,
+            noise_parameter,
+            AC_MAX_VAL,
+            self.training
+        )
+        
+        # Resample features from the spatial prior map to the size of each latent grid
+        flat_spatial_prior_features = self.spatial_prior.interpolate_pyramid(quantized_spatial_prior_map)
+
         # Get all the B latent variables as a single one dimensional vector
         flat_latent = torch.cat(
             [spatial_latent_i.view(-1) for spatial_latent_i in decoder_side_latent],
             dim=0,
         )
 
-        # Feed the spatial context to the arm MLP and get mu and scale
-        flat_mu, flat_scale, flat_log_scale = self.arm(flat_context)
+        # Feed the spatial context and spatial hyperprior to the arm MLP and get mu and scale
+        flat_mu, flat_scale, flat_log_scale = self.arm(torch.cat([flat_spatial_context, flat_spatial_prior_features], dim=1))
 
         # Compute the rate (i.e. the entropy of flat latent knowing mu and scale)
         proba = torch.clamp_min(
@@ -419,6 +498,22 @@ class CoolChicEncoder(nn.Module):
             min=2**-16,  # No value can cost more than 16 bits.
         )
         flat_rate = -torch.log2(proba)
+
+        flat_spatial_prior_context = _get_neighbor(
+                    quantized_spatial_prior_map, self.mask_size, self.sp_non_zero_pixel_ctx_index
+                )
+
+        flat_sp_mu, flat_sp_scale, flat_sp_log_scale = self.sp_arm(flat_spatial_prior_context)
+        if condition is not None:
+            flat_sp_mu = flat_sp_mu + condition.sum(dim=1) / condition.size(1)
+
+        flat_spatial_prior_map = quantized_spatial_prior_map.view(-1)
+        sp_proba = torch.clamp_min(
+            _laplace_cdf(flat_spatial_prior_map + 0.5, flat_sp_mu, flat_sp_scale)
+            - _laplace_cdf(flat_spatial_prior_map - 0.5, flat_sp_mu, flat_sp_scale),
+            min=2**-16,  # No value can cost more than 16 bits.
+        )
+        flat_sp_rate = -torch.log2(sp_proba)
 
         # Upsampling and synthesis to get the output
         synthesis_output = self.synthesis(self.upsampling(decoder_side_latent))
@@ -435,6 +530,12 @@ class CoolChicEncoder(nn.Module):
             additional_data["detailed_rate_bit"] = []
             additional_data["detailed_centered_latent"] = []
             additional_data["hpfilters"] = []
+            
+            #additional_data["quantized_spatial_prior_context"] = quantized_spatial_prior_context
+            additional_data["detailed_sent_spatial_prior_map"] = quantized_spatial_prior_map
+            additional_data["detailed_spatial_prior_map_log_scale"] = flat_sp_log_scale
+            additional_data["detailed_spatial_prior_map_mu"] = flat_sp_mu
+            additional_data["detailed_spatial_prior_map_rate_bit"] = flat_sp_rate
 
             # "Pointer" for the reading of the 1D scale, mu and rate
             cnt = 0
@@ -463,9 +564,16 @@ class CoolChicEncoder(nn.Module):
                     additional_data["detailed_sent_latent"][-1] - mu_i
                 )
 
+        if flat_sp_rate is not None:
+            total_rate = torch.cat([flat_rate, flat_sp_rate])
+        else:
+            total_rate = flat_rate
+
         res: CoolChicEncoderOutput = {
             "raw_out": synthesis_output,
-            "rate": flat_rate,
+            "rate": total_rate,
+            "latent_rate": flat_rate,
+            "spatial_prior_map_rate": flat_sp_rate if flat_sp_rate is not None else torch.tensor(0.0),
             "additional_data": additional_data,
         }
 
@@ -487,11 +595,15 @@ class CoolChicEncoder(nn.Module):
             }
         )
         param.update({f"arm.{k}": v for k, v in self.arm.get_param().items()})
+        param.update({f"sp_arm.{k}": v for k, v in self.sp_arm.get_param().items()})
         param.update(
             {f"upsampling.{k}": v for k, v in self.upsampling.get_param().items()}
         )
         param.update(
             {f"synthesis.{k}": v for k, v in self.synthesis.get_param().items()}
+        )
+        param.update(
+            {f"spatial_prior.{k}": v for k, v in self.spatial_prior.get_param().items()}
         )
         return param
 
@@ -517,10 +629,12 @@ class CoolChicEncoder(nn.Module):
         """Reinitialize in place the different parameters of a CoolChicEncoder
         namely the latent grids, the arm, the upsampling and the weights.
         """
+        self.sp_arm.reinitialize_parameters()
         self.arm.reinitialize_parameters()
         self.upsampling.reinitialize_parameters()
         self.synthesis.reinitialize_parameters()
         self.initialize_latent_grids()
+        self.spatial_prior.initialize()
 
         # Reset the quantization steps and exp-golomb count of the neural
         # network to None since we are resetting the parameters.
@@ -790,14 +904,23 @@ class CoolChicEncoder(nn.Module):
             self.synthesis.layers, "", input_syn, output_syn
         )
 
+        sp_arm_complexity = self.flops_per_module["sp_arm"] / n_pixels if "sp_arm" in self.flops_per_module else 0
+        sp_arm_share_complexity = 100 * sp_arm_complexity / total_mac_per_pix
+        sp_interpolator_complexity = self.flops_per_module["spatial_prior.bic_interpolator"] / n_pixels if "spatial_prior.bic_interpolator" in self.flops_per_module else 0
+        sp_interpolator_share_complexity = 100 * sp_interpolator_complexity / total_mac_per_pix
+
         if print_detailed_archi:
             return long_description
         else:
             short_description = (
                 # f"\nCool-chic decoding complexity: {total_mac_per_pix:.0f} MAC / pixel\n"
-                f"   - {'ARM':<10} {arm_complexity:5.0f} MAC / pixel ; {arm_share_complexity:4.1f} % of the complexity\n"
-                f"   - {'Upsampling':<10} {ups_complexity:5.0f} MAC / pixel ; {ups_share_complexity:4.1f} % of the complexity\n"
-                f"   - {'Synthesis':<10} {syn_complexity:5.0f} MAC / pixel ; {syn_share_complexity:4.1f} % of the complexity\n"
+                f"   - {'ARM':<10} {arm_complexity:5.4f} MAC / pixel ; {arm_share_complexity:4.1f} % of the complexity\n"
+                f"   - {'Upsampling':<10} {ups_complexity:5.4f} MAC / pixel ; {ups_share_complexity:4.1f} % of the complexity\n"
+                f"   - {'Synthesis':<10} {syn_complexity:5.4f} MAC / pixel ; {syn_share_complexity:4.1f} % of the complexity\n"
+                f"   - {'SP ARM':<10} {sp_arm_complexity:5.4f} MAC / pixel ; {sp_arm_share_complexity:4.1f} % of the complexity\n"
+                f"   - {'SP Interpolator':<10} {sp_interpolator_complexity:5.4f} MAC / pixel ; {sp_interpolator_share_complexity:4.1f} % of the complexity\n"
+                f"----------------------------------\n"
+                f"   - {'Total':<10} {total_mac_per_pix:.4f} MAC / pixel; {arm_share_complexity + ups_share_complexity + syn_share_complexity + sp_arm_share_complexity + sp_interpolator_share_complexity:.1f} % of the complexity\n"
             )
 
             return short_description

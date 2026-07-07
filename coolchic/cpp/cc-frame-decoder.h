@@ -1,3 +1,5 @@
+#ifndef CC_FRAME_DECODER_H
+#define CC_FRAME_DECODER_H
 
 #include "common.h"
 #include "frame-memory.h"
@@ -18,6 +20,9 @@ public:
           m_mlpw_t(NULL),
           m_mlpb(NULL),
           m_mlp_n_hidden_layers_arm(-1),
+          m_spmlpw_t(NULL),
+          m_spmlpb(NULL),
+          m_spmlp_n_hidden_layers_arm(-1),
           m_ups_n(-1),
           m_upsw(NULL),
           m_ups_n_preconcat(-1),
@@ -37,6 +42,7 @@ public:
           ,m_arm_pad(0)
           ,m_ups_pad(0)
           ,m_max_pad(0)
+          ,m_spatial_prior_downsampling_factor(-1)
           { 
             if (m_output_bitdepth == 0)
                 m_output_bitdepth = m_gop_header.output_bitdepth;
@@ -44,7 +50,16 @@ public:
                 m_output_chroma_format = m_gop_header.frame_data_type == 1 ? 420 : 444;
           };
 
-    ~cc_frame_decoder() {delete[] m_mlpw_t; delete[] m_mlpb; delete[] m_upsw; delete[] m_upsw_preconcat; delete[] m_synw; delete[] m_synb;};
+    ~cc_frame_decoder() {
+        delete[] m_mlpw_t; 
+        delete[] m_mlpb; 
+        delete[] m_spmlpw_t; 
+        delete[] m_spmlpb; 
+        delete[] m_upsw; 
+        delete[] m_upsw_preconcat; 
+        delete[] m_synw; 
+        delete[] m_synb;
+    };
 public:
     int get_syn_idx(int branch_idx, int layer_idx) { return branch_idx*m_syn_n_layers + layer_idx; }
 
@@ -63,6 +78,12 @@ private:
     weights_biases  m_mlpwOUT;
     weights_biases  m_mlpbOUT;
     int             m_mlp_n_hidden_layers_arm;
+
+    weights_biases *m_spmlpw_t;
+    weights_biases *m_spmlpb;
+    weights_biases  m_spmlpwOUT;
+    weights_biases  m_spmlpbOUT;
+    int             m_spmlp_n_hidden_layers_arm;
 
     int             m_ups_n;
     weights_biases_ups *m_upsw;
@@ -108,10 +129,19 @@ private:
     // set by arm to indicate no content, avoid ups for no content.
     std::vector<bool> m_zero_layer;
 
+    int m_spatial_prior_dim_sparm;
+    int m_spatial_prior_n_hidden_sparm;
+    int m_spatial_prior_downsampling_factor;
+    bool m_spatial_prior_layer_id_context;
+
+    frame_memory<int32_t> m_spatial_prior_map;
+
 private:
     void            read_arm(struct cc_bs_frame_coolchic &frame_symbols);
+    void            read_sparm(struct cc_bs_frame_coolchic &frame_symbols);
     void            read_ups(struct cc_bs_frame_coolchic &frame_symbols);
     void            read_syn(struct cc_bs_frame_coolchic &frame_symbols);
+    void            read_spatial_prior(struct cc_bs_frame_coolchic &frame_symbols);
     bool            can_fuse(struct cc_bs_frame_coolchic &frame_symbols);
     void            check_allocations(struct cc_bs_frame_coolchic &frame_symbols);
 
@@ -122,4 +152,6 @@ private:
     frame_memory<SYN_INT_FLOAT>   *run_syn_branch(struct cc_bs_frame_coolchic &frame_symbols, int branch_no, frame_memory<SYN_INT_FLOAT> *syn_in, frame_memory<SYN_INT_FLOAT> *syn_out, frame_memory<SYN_INT_FLOAT> *syn_tmp);
     frame_memory<SYN_INT_FLOAT>   *run_syn(struct cc_bs_frame_coolchic &frame_symbols);
 };
+
+#endif // CC_FRAME_DECODER_H
 

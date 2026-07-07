@@ -1,11 +1,15 @@
 /*
-    Software Name: Cool-Chic
+    Software Name: Cool-Chic / LANCE
     SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+    SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
     SPDX-License-Identifier: BSD 3-Clause "New"
 
     This software is distributed under the BSD-3-Clause license.
     Authors: see CONTRIBUTORS.md
 */
+
+#ifndef CC_CONTEXTS_H
+#define CC_CONTEXTS_H
 
 // some numbers and indices related to mu and sig quantization.
 int const N_MUQ = 16;  // number of mu offsets.
@@ -71,3 +75,5 @@ public:
 };
 
 extern MuSigGTs g_contexts[N_MUQ+1][N_SIGQ];
+
+#endif // CC_CONTEXTS_H

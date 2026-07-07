@@ -1,6 +1,5 @@
 /*
-    Software Name: Cool-Chic / LANCE
-    SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+    Software Name: LANCE
     SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
     SPDX-License-Identifier: BSD 3-Clause "New"
 
@@ -12,32 +11,27 @@
 #include "common.h"
 #include "cc-contexts.h"
 #include "cc-bac.h"
-#include "arm_cpu.h"
-#include <cmath>
+#include "loco.h"
+#include "sparm_cpu.h"
 
 // generic: nctxts (8,16,24,32), hiddenlayers (0,1,2)
 // chains two 16_16, 16_16, final 16_2
-void custom_conv_11_int32_cpu_X_X_X(weights_biases *kwtX_n_n, weights_biases *kbX_n, // kwtX_n_n[n_hidden_layers] -- kernel weights, transposed.
+void custom_sp_conv_11_int32_cpu_X_X_X(weights_biases *kwtX_n_n, weights_biases *kbX_n, // kwtX_n_n[n_hidden_layers] -- kernel weights, transposed.
                                     weights_biases *kwOUT_n_2, weights_biases *kbOUT_2, // _n_2, weights not transposed.
                                     int32_t *context_indicies, int32_t n_contexts, int32_t n_hidden_layers,
                                     int32_t *SRC,
-                                    int src_h, int src_w, int src_pad,
-                                    int32_t *spatial_prior,
-                                    int layer, int n_layer, bool layerid_context,
+                                    int src_h, int src_w, int src_pad, int stride,
                                     BACContext &bac_context
                                     )
 {
     int const n_inout = n_contexts;
-    int n_inputs;
-    int const n_lance_inputs = 1 + (layerid_context ? 1 : 0); // +1 for spatial prior input.
-    int32_t const layer_id = layer * ARM_SCALE / n_layer;
     int const n_final_out = 2;
 
     int32_t *src = SRC;
-    int32_t ioX[2][32+2]; // buffers used for input and output.
+    int32_t ioX[2][32]; // buffers used for input and output.
 
     for (int y = 0; y < src_h; y++, src += src_pad+src_pad) // pads are: eol of this, and bol of next.
-    for (int x = 0; x < src_w; x++, src++, spatial_prior++)
+    for (int x = 0; x < src_w; x++, src++)
     {
         if (!bac_coded(bac_context, y, x))
         {
@@ -60,12 +54,7 @@ void custom_conv_11_int32_cpu_X_X_X(weights_biases *kwtX_n_n, weights_biases *kb
         // load input.
         for (int i = 0; i < n_inout; i++)
         {
-            inputs[i] = src[context_indicies[i]];
-        }
-        inputs[n_inout] = *spatial_prior;
-        if (layerid_context)
-        {
-            inputs[n_inout+1] = layer_id;
+            inputs[i] = src[context_indicies[i]]; // gather
         }
 
         for (int hl = 0; hl < n_hidden_layers; hl++)
@@ -76,22 +65,12 @@ void custom_conv_11_int32_cpu_X_X_X(weights_biases *kwtX_n_n, weights_biases *kb
             int32_t *kw = kwtX_n_n[hl].data;
             int32_t *kb = kbX_n[hl].data;
 
-            if (hl == 0)
-                n_inputs = n_inout + n_lance_inputs;
-            else
-                n_inputs = n_inout;
-
             for (int i = 0; i < n_inout; i++)
-            {
                 outputs[i] = kb[i] + inputs[i]*ARM_SCALE; // residual == 1
-            }
-            for (int il = 0; il < n_inputs; il++, kw += n_inout)
+            for (int il = 0; il < n_inout; il++, kw += n_inout)
             {
                 for (int i = 0; i < n_inout; i++)
-                {
                     outputs[i] += inputs[il]*kw[i];
-                }
-                    
             }
             for (int i = 0; i < n_inout; i++)
             {
@@ -118,11 +97,18 @@ void custom_conv_11_int32_cpu_X_X_X(weights_biases *kwtX_n_n, weights_biases *kb
             out[ol] = sum;
         }
 
+        // MED predictor
+        auto c = src - stride - 1;
+        auto a = src - stride;
+        auto b = src - 1;
+        auto med_prediction = loco_predictor(*a, *b, *c);
+
         // bac it.
         int xx = decode_latent_layer_bac_single(
                         bac_context,
-                        out[0], out[1]
+                        out[0] + med_prediction, out[1]
                     );
         src[0] = xx<<ARM_PRECISION;
+        //printf("(%d,%d): a=%d, b=%d, c=%d; med_pred=%d; out0=%d,out1=%d; decoded=%d\n", y, x, *a, *b, *c, med_prediction, out[0], out[1], xx);
     } // x, y
 }

@@ -1,6 +1,7 @@
 /*
-    Software Name: Cool-Chic
+    Software Name: Cool-Chic / LANCE
     SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+    SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
     SPDX-License-Identifier: BSD 3-Clause "New"
 
     This software is distributed under the BSD-3-Clause license.
@@ -14,6 +15,7 @@
 #include "arm_avx2.h"
 
 #include <immintrin.h>
+#include <cmath>
 
 #include "common_avx2.h"
 

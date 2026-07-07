@@ -1,6 +1,7 @@
 /*
-    Software Name: Cool-Chic
+    Software Name: Cool-Chic / LANCE
     SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+    SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
     SPDX-License-Identifier: BSD 3-Clause "New"
 
     This software is distributed under the BSD-3-Clause license.
@@ -16,13 +17,15 @@ void AVX_NAME(weights_biases *kwtX_n_n, weights_biases *kbX_n, // kwtX_n_n[n_hid
                                       int32_t *context_indicies, int32_t n_contexts_param, int32_t n_hidden_layers,
                                       int32_t *src,
                                       int src_h, int src_w, int src_pad,
+                                      int32_t *spatial_prior,
+                                      int layer, int n_layer, bool layerid_context,
                                       BACContext &bac_context
                                       )
 {
     int const n_in = NCONTEXTS; // n_contexts;
     int const n_inout8 = n_in/8;
     int const n_final_out = 2;
-
+    int32_t const layer_id = layerid_context ? (layer * ARM_SCALE / n_layer) : 0;
     if (n_contexts_param != n_in)
     {
         printf("bad avx2_X_X_X call: context_param %d wanted %d\n", n_contexts_param, n_in);
@@ -47,7 +50,7 @@ void AVX_NAME(weights_biases *kwtX_n_n, weights_biases *kbX_n, // kwtX_n_n[n_hid
 #endif
 
     for (int y = 0; y < src_h; y++, src += src_pad+src_pad) // eol of this, and bol of next.
-    for (int x = 0; x < src_w; x++, src++)
+    for (int x = 0; x < src_w; x++, src++, spatial_prior++)
     {
         if (!bac_coded(bac_context, y, x))
         {
@@ -68,7 +71,6 @@ void AVX_NAME(weights_biases *kwtX_n_n, weights_biases *kbX_n, // kwtX_n_n[n_hid
                 continue;
             }
         }
-
         __m256i input_avx2_src0_0;
         __m256i out_avx2_src0_0;
 #if NCONTEXTS >= 16
@@ -177,6 +179,61 @@ void AVX_NAME(weights_biases *kwtX_n_n, weights_biases *kbX_n, // kwtX_n_n[n_hid
 #else
                 what NCONTEXTS
 #endif
+            }
+
+            // Process additional inputs (spatial prior and layer_id) for first layer only
+            if (hl == 0)
+            {
+                // Process spatial prior input (always present)
+                {
+                    __m256i input_broadcast = _mm256_set1_epi32(*spatial_prior);
+                    
+                    mul_avx2 = _mm256_load_si256((const __m256i *)k);
+                    mul_avx2 = _mm256_mullo_epi32(input_broadcast, mul_avx2);
+                    out_avx2_src0_0 = _mm256_add_epi32(out_avx2_src0_0, mul_avx2);
+#if NCONTEXTS >= 16
+                    mul_avx2 = _mm256_load_si256((const __m256i *)(k+8));
+                    mul_avx2 = _mm256_mullo_epi32(input_broadcast, mul_avx2);
+                    out_avx2_src0_1 = _mm256_add_epi32(out_avx2_src0_1, mul_avx2);
+#endif
+#if NCONTEXTS >= 24
+                    mul_avx2 = _mm256_load_si256((const __m256i *)(k+16));
+                    mul_avx2 = _mm256_mullo_epi32(input_broadcast, mul_avx2);
+                    out_avx2_src0_2 = _mm256_add_epi32(out_avx2_src0_2, mul_avx2);
+#endif
+#if NCONTEXTS >= 32
+                    mul_avx2 = _mm256_load_si256((const __m256i *)(k+24));
+                    mul_avx2 = _mm256_mullo_epi32(input_broadcast, mul_avx2);
+                    out_avx2_src0_3 = _mm256_add_epi32(out_avx2_src0_3, mul_avx2);
+#endif
+                    k += n_in;
+                }
+                
+                // Process layer_id input (if present)
+                if (layerid_context)
+                {
+                    __m256i input_broadcast = _mm256_set1_epi32(layer_id);
+                    
+                    mul_avx2 = _mm256_load_si256((const __m256i *)k);
+                    mul_avx2 = _mm256_mullo_epi32(input_broadcast, mul_avx2);
+                    out_avx2_src0_0 = _mm256_add_epi32(out_avx2_src0_0, mul_avx2);
+#if NCONTEXTS >= 16
+                    mul_avx2 = _mm256_load_si256((const __m256i *)(k+8));
+                    mul_avx2 = _mm256_mullo_epi32(input_broadcast, mul_avx2);
+                    out_avx2_src0_1 = _mm256_add_epi32(out_avx2_src0_1, mul_avx2);
+#endif
+#if NCONTEXTS >= 24
+                    mul_avx2 = _mm256_load_si256((const __m256i *)(k+16));
+                    mul_avx2 = _mm256_mullo_epi32(input_broadcast, mul_avx2);
+                    out_avx2_src0_2 = _mm256_add_epi32(out_avx2_src0_2, mul_avx2);
+#endif
+#if NCONTEXTS >= 32
+                    mul_avx2 = _mm256_load_si256((const __m256i *)(k+24));
+                    mul_avx2 = _mm256_mullo_epi32(input_broadcast, mul_avx2);
+                    out_avx2_src0_3 = _mm256_add_epi32(out_avx2_src0_3, mul_avx2);
+#endif
+                    k += n_in;
+                }
             }
 
             out_avx2_src0_0 = _mm256_blendv_epi8(z, out_avx2_src0_0, _mm256_cmpgt_epi32(out_avx2_src0_0, z));

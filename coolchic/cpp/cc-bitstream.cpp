@@ -1,6 +1,7 @@
 /*
-    Software Name: Cool-Chic
+    Software Name: Cool-Chic / LANCE
     SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+    SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
     SPDX-License-Identifier: BSD 3-Clause "New"
 
     This software is distributed under the BSD-3-Clause license.
@@ -146,6 +147,11 @@ void read_n_bytes_nn(FILE *bs, struct cc_bs_layer_quant_info &lqi)
         lqi.n_bytes_nn_bias = read_utf_coded(bs);
 }
 
+void read_spatial_prior_module_info(FILE *bs, cc_bs_spatial_prior_module_info &sp)
+{
+    sp.map_size = read_utf_coded(bs);
+}
+
 void print_lqi(char const *name, struct cc_bs_layer_quant_info &lqi)
 {
     printf("    %s:", name);
@@ -188,6 +194,14 @@ void cc_bs_frame_coolchic::copy_archi_from(cc_bs_frame_coolchic const &src, int 
         n_latent_n_resolutions = src.n_latent_n_resolutions;
         latent_n_2d_grid = src.latent_n_2d_grid;
         n_ft_per_latent = src.n_ft_per_latent;
+    }
+
+    if (topology_copy_bits&(1<<TOP_COPY_SPATIAL_PRIOR))
+    {
+        spatial_prior.dim_sparm = src.spatial_prior.dim_sparm;
+        spatial_prior.n_hidden_sparm = src.spatial_prior.n_hidden_sparm;
+        spatial_prior.layer_id_context = src.spatial_prior.layer_id_context;
+        spatial_prior.downsampling_factor = src.spatial_prior.downsampling_factor;
     }
 }
 
@@ -242,6 +256,16 @@ static bool read_cc_archi(struct cc_bs_frame_coolchic &out, int topology_copy_bi
         }
     }
 
+    if ((topology_copy_bits&(1<<TOP_COPY_SPATIAL_PRIOR)) == 0)
+    {
+        raw = read_int_1(bs);
+        bool raw_dim_sparm = raw&0x01;
+        out.spatial_prior.dim_sparm = raw_dim_sparm ? 5 : 3;
+        out.spatial_prior.n_hidden_sparm = (raw>>1)&0x03;
+        out.spatial_prior.layer_id_context = (raw>>3)&0x01;
+        out.spatial_prior.downsampling_factor = (raw>>4)&0x0F;
+    }
+
     return true;
 }
 
@@ -252,16 +276,19 @@ static bool read_cc_lengths(struct cc_bs_frame_coolchic &cc, bool latents_zero, 
     cc.hls_sig_blksize = (signed char)read_int_1(bs); // signed.
 
     read_q_step_index_nn(bs, cc.arm_lqi);
+    read_q_step_index_nn(bs, cc.sparm_lqi);
     if (!cc.latents_zero)
         read_q_step_index_nn(bs, cc.ups_lqi);
     read_q_step_index_nn(bs, cc.syn_lqi);
 
     read_scale_index_nn(bs, cc.arm_lqi);
+    read_scale_index_nn(bs, cc.sparm_lqi);
     if (!cc.latents_zero)
         read_scale_index_nn(bs, cc.ups_lqi);
     read_scale_index_nn(bs, cc.syn_lqi);
 
     read_n_bytes_nn(bs, cc.arm_lqi);
+    read_n_bytes_nn(bs, cc.sparm_lqi);
     if (!cc.latents_zero)
         read_n_bytes_nn(bs, cc.ups_lqi);
     read_n_bytes_nn(bs, cc.syn_lqi);
@@ -277,6 +304,8 @@ static bool read_cc_lengths(struct cc_bs_frame_coolchic &cc, bool latents_zero, 
             cc.n_bytes_per_latent[i] = read_utf_coded(bs);
     }
 
+    read_spatial_prior_module_info(bs, cc.spatial_prior);
+
     return true;
 }
 
@@ -287,6 +316,11 @@ void cc_bs_frame_coolchic::print()
     printf("    n_hidden_layers_arm: %d\n", n_hidden_layers_arm);
     printf("    n_ups_kernel=%d, ups_ks=%d\n", n_ups_kernel, ups_k_size);
     printf("    n_ups_preconcat_kernel=%d, ups_preconcat_ks=%d\n", n_ups_preconcat_kernel, ups_preconcat_k_size);
+    printf("    spatial_prior:");
+    printf("      downsampling_factor=%d dim_sparm=%d n_hidden_sparm=%d layer_id_context=%d\n",
+           spatial_prior.downsampling_factor, spatial_prior.dim_sparm, spatial_prior.n_hidden_sparm, spatial_prior.layer_id_context);
+    printf("      map_size=%d\n",
+           spatial_prior.map_size);
     printf("    layers_synthesis:");
     for (int i = 0; i < n_syn_layers; i++)
     {
@@ -298,6 +332,7 @@ void cc_bs_frame_coolchic::print()
     printf("    hls_sig_blksize: %d\n", hls_sig_blksize);
 
     print_lqi("arm", arm_lqi);
+    print_lqi("sparm", sparm_lqi);
     if (!latents_zero)
         print_lqi("ups", ups_lqi);
     print_lqi("syn", syn_lqi);
@@ -395,10 +430,14 @@ static bool read_cc_content(struct cc_bs_frame_coolchic &cc, FILE *f)
 
     cc.m_arm_weights_hevc = get_coded(f, cc.arm_lqi.n_bytes_nn_weight);
     cc.m_arm_biases_hevc = get_coded(f, cc.arm_lqi.n_bytes_nn_bias);
+    cc.m_sparm_weights_hevc = get_coded(f, cc.sparm_lqi.n_bytes_nn_weight);
+    cc.m_sparm_biases_hevc = get_coded(f, cc.sparm_lqi.n_bytes_nn_bias);
     cc.m_ups_weights_hevc = get_coded(f, cc.ups_lqi.n_bytes_nn_weight);
     cc.m_ups_biases_hevc = get_coded(f, cc.ups_lqi.n_bytes_nn_bias);
     cc.m_syn_weights_hevc = get_coded(f, cc.syn_lqi.n_bytes_nn_weight);
     cc.m_syn_biases_hevc = get_coded(f, cc.syn_lqi.n_bytes_nn_bias);
+
+    cc.m_spatial_prior_map_hevc = get_coded(f, cc.spatial_prior.map_size);
 
     //printf("arm coded w%ld b%ld bytes w:%02x %02x %02x\n", cc.m_arm_weights_hevc.size(), cc.m_arm_biases_hevc.size(), cc.m_arm_weights_hevc[0], cc.m_arm_weights_hevc[1], cc.m_arm_weights_hevc[2]);
     //printf("ups coded w%ld b%ld bytes w:%02x %02x %02x\n", cc.m_ups_weights_hevc.size(), cc.m_ups_biases_hevc.size(), cc.m_ups_weights_hevc[0], cc.m_ups_weights_hevc[1], cc.m_ups_weights_hevc[2]);

@@ -1,5 +1,6 @@
-# Software Name: Cool-Chic
+# Software Name: Cool-Chic / LANCE
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 Orange
+# SPDX-FileCopyrightText: Copyright (c) 2026 Martin Benjak
 # SPDX-License-Identifier: BSD 3-Clause "New"
 #
 # This software is distributed under the BSD-3-Clause license.
@@ -38,6 +39,7 @@ class ArmLinear(nn.Module):
         in_channels: int,
         out_channels: int,
         residual: bool = False,
+        zero_init: bool = False
     ):
         """
         Args:
@@ -52,6 +54,7 @@ class ArmLinear(nn.Module):
         self.residual = residual
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.zero_init = zero_init
 
         # -------- Instantiate empty parameters, set by the initialize function
         self.weight = nn.Parameter(
@@ -71,7 +74,7 @@ class ArmLinear(nn.Module):
           \\tfrac{1}{(C_{out})^4})`.
         """
         self.bias = nn.Parameter(torch.zeros_like(self.bias), requires_grad=True)
-        if self.residual:
+        if self.residual or self.zero_init:
             self.weight = nn.Parameter(
                 torch.zeros_like(self.weight), requires_grad=True
             )
@@ -91,7 +94,7 @@ class ArmLinear(nn.Module):
             Tensor with shape :math:`[B, C_{out}]`.
         """
         if self.residual:
-            return F.linear(x, self.weight, bias=self.bias) + x
+            return F.linear(x, self.weight, bias=self.bias) + x[:,:self.out_channels]
 
         # Not residual
         else:
@@ -137,32 +140,46 @@ class Arm(nn.Module):
     from the ``ArmLinear`` class.
     """
 
-    def __init__(self, dim_arm: int, n_hidden_layers_arm: int):
+    def __init__(self, dim_arm: int, 
+                 n_hidden_layers_arm: int, 
+                 dim_sp_context: int = 0, 
+                 dim_out: int = 2, 
+                 residual: bool = True, 
+                 dim_hidden = None,
+                 zero_init: bool = False):
         """
         Args:
             dim_arm: Number of context pixels AND dimension of all hidden
                 layers :math:`C`.
             n_hidden_layers_arm: Number of hidden layers. Set it to 0 for
                 a linear ARM.
+            dim_sp_context: Dimension of the spatial prior context to be
+                concatenated to the pixel context.
         """
         super().__init__()
 
-        assert dim_arm % 8 == 0, (
-            f"ARM context size and hidden layer dimension must be "
-            f"a multiple of 8. Found {dim_arm}."
-        )
+        #assert dim_arm % 8 == 0, (
+        #    f"ARM context size and hidden layer dimension must be "
+        #    f"a multiple of 8. Found {dim_arm}."
+        #)
         self.dim_arm = dim_arm
+        self.dim_sp_context = dim_sp_context
+        self.dim_out = dim_out
 
         # ======================== Construct the MLP ======================== #
         layers_list = nn.ModuleList()
 
         # Construct the hidden layer(s)
         for i in range(n_hidden_layers_arm):
-            layers_list.append(ArmLinear(dim_arm, dim_arm, residual=True))
+            if i == 0:
+                in_dim = dim_arm + dim_sp_context
+            else:
+                in_dim = dim_hidden if dim_hidden is not None else dim_arm
+            layers_list.append(ArmLinear(in_dim, dim_hidden if dim_hidden is not None else dim_arm, residual=residual, zero_init=zero_init))
             layers_list.append(nn.ReLU())
 
         # Construct the output layer. It always has 2 outputs (mu and scale)
-        layers_list.append(ArmLinear(dim_arm, 2, residual=False))
+        layers_list.append(ArmLinear(dim_hidden if dim_hidden is not None else dim_arm, dim_out, residual=False, zero_init=zero_init))
         self.mlp = nn.Sequential(*layers_list)
         # ======================== Construct the MLP ======================== #
 
@@ -199,14 +216,17 @@ class Arm(nn.Module):
             Tensor of shape :math:([B]). Also return the *log scale*
             :math:`s` as described above. Tensor of shape :math:`(B)`
         """
-        raw_proba_param = self.mlp(x)
-        mu = raw_proba_param[:, 0]
-        log_scale = raw_proba_param[:, 1]
+        if self.dim_out == 2:
+            raw_proba_param = self.mlp(x)
+            mu = raw_proba_param[:, 0]
+            log_scale = raw_proba_param[:, 1]
 
-        # no scale smaller than exp(-4.6) = 1e-2 or bigger than exp(5.01) = 150
-        scale = torch.exp(torch.clamp(log_scale - 4, min=-4.6, max=5.0))
+            # no scale smaller than exp(-4.6) = 1e-2 or bigger than exp(5.01) = 150
+            scale = torch.exp(torch.clamp(log_scale - 4, min=-4.6, max=5.0))
 
-        return mu, scale, log_scale
+            return mu, scale, log_scale
+        else:
+            return self.mlp(x)
 
     def get_param(self) -> OrderedDict[str, Tensor]:
         """Return **a copy** of the weights and biases inside the module.
@@ -319,7 +339,21 @@ def _get_non_zero_pixel_ctx_index(dim_arm: int) -> Tensor:
         Tensor: 1D tensor with the flattened index of the context pixels.
     """
     # fmt: off
-    if dim_arm == 8:
+    if dim_arm == 3:
+        return torch.tensor(
+            [ 30, 31, 
+              39, #
+            ]
+        )
+    elif dim_arm == 5:
+        return torch.tensor(
+            [
+                         22,
+                     30, 31,
+                 38, 39, #
+            ]
+        )
+    elif dim_arm == 8:
         return torch.tensor(
             [            13,
                          22,

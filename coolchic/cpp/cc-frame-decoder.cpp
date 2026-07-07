@@ -3,6 +3,8 @@
 #define CCDECAPI_AVX2
 #endif
 
+#include <cmath>
+
 #include "common.h"
 #include "TDecBinCoderCABAC.h"
 #include "cc-contexts.h"
@@ -17,6 +19,8 @@
 #endif
 
 #include "arm_cpu.h"
+#include "sparm_cpu.h"
+#include "resampler.h"
 #include "ups_cpu.h"
 #include "syn_cpu.h"
 
@@ -111,7 +115,20 @@ int const Q_STEP_SYN_BIAS_SHIFT[] = {
 int32_t *get_context_indicies(int n_contexts, int stride)
 {
     static int32_t indicies_constant[32];
-    if (n_contexts == 8)
+    if (n_contexts == 3)
+    {
+        int32_t indicies[] = {                          -1*stride-1, -1*stride+0,
+                                                        -0*stride-1 };
+        memcpy(indicies_constant, indicies, n_contexts*sizeof(indicies[0]));
+    }
+    else if (n_contexts == 5)
+    {
+        int32_t indicies[] = {                                       -2*stride+0,
+                                                        -1*stride-1, -1*stride+0,
+                                           -0*stride-2, -0*stride-1 };
+        memcpy(indicies_constant, indicies, n_contexts*sizeof(indicies[0]));
+    }
+    else if (n_contexts == 8)
     {
         int32_t indicies[] = {                                       -3*stride+0,
                                                                      -2*stride+0,
@@ -252,23 +269,92 @@ void cc_frame_decoder::read_arm(struct cc_bs_frame_coolchic &frame_symbols)
     int q_step_w_shift = Q_STEP_ARM_WEIGHT_SHIFT[arm_lqi.q_step_index_nn_weight];
     int q_step_b_shift = Q_STEP_ARM_BIAS_SHIFT[arm_lqi.q_step_index_nn_bias];
     int arm_n_features = frame_symbols.dim_arm;
-    int32_t bucket[arm_n_features*arm_n_features]; // we transpose from this.
+    int arm_n_features_input = arm_n_features + 1; // +1 for spatial prior input.
+    arm_n_features_input += frame_symbols.spatial_prior.layer_id_context ? 1 : 0; // +1 if layerid is concatenated as well.
+    int32_t bucket[arm_n_features_input*arm_n_features]; // we transpose from this.
 
     for (int idx = 0; idx < frame_symbols.n_hidden_layers_arm; idx++)
     {
-        decode_weights_qi(&bucket[0], &cabac_weights, arm_lqi.scale_index_nn_weight, arm_n_features*arm_n_features, q_step_w_shift, ARM_PRECISION);
-        // transpose.
-        m_mlpw_t[idx].update_to(arm_n_features*arm_n_features);
-        int kidx = 0;
-        for (int ky = 0; ky < arm_n_features; ky++)
-            for (int kx = 0; kx < arm_n_features; kx++)
-            {
-                m_mlpw_t[idx].data[kidx++] = bucket[kx*arm_n_features+ky];
-            }
+        if (idx == 0)
+        {
+            // Layer 0 has additional inputs for spatial prior and layerid context
+            decode_weights_qi(&bucket[0], &cabac_weights, arm_lqi.scale_index_nn_weight, arm_n_features_input*arm_n_features, q_step_w_shift, ARM_PRECISION);
+            // transpose
+            m_mlpw_t[idx].update_to(arm_n_features_input*arm_n_features);
+            int kidx = 0;
+            for (int ky = 0; ky < arm_n_features_input; ky++)
+                for (int kx = 0; kx < arm_n_features; kx++)
+                {
+                    m_mlpw_t[idx].data[kidx++] = bucket[kx*arm_n_features_input+ky];
+                }
+        }
+        else
+        {
+            decode_weights_qi(&bucket[0], &cabac_weights, arm_lqi.scale_index_nn_weight, arm_n_features*arm_n_features, q_step_w_shift, ARM_PRECISION);
+            // transpose
+            m_mlpw_t[idx].update_to(arm_n_features*arm_n_features);
+            int kidx = 0;
+            for (int ky = 0; ky < arm_n_features; ky++)
+                for (int kx = 0; kx < arm_n_features; kx++)
+                {
+                    m_mlpw_t[idx].data[kidx++] = bucket[kx*arm_n_features+ky];
+                }
+        }
         decode_weights_qi(m_mlpb[idx], &cabac_biases, arm_lqi.scale_index_nn_bias, arm_n_features, q_step_b_shift, ARM_PRECISION*2);
     }
     decode_weights_qi(m_mlpwOUT, &cabac_weights, arm_lqi.scale_index_nn_weight, arm_n_features*2, q_step_w_shift, ARM_PRECISION);
     decode_weights_qi(m_mlpbOUT, &cabac_biases,  arm_lqi.scale_index_nn_bias, 2, q_step_b_shift, ARM_PRECISION*2);
+}
+
+void cc_frame_decoder::read_sparm(struct cc_bs_frame_coolchic &frame_symbols)
+{
+    if (frame_symbols.spatial_prior.n_hidden_sparm != m_spmlp_n_hidden_layers_arm)
+    {
+        m_spmlp_n_hidden_layers_arm = frame_symbols.spatial_prior.n_hidden_sparm;
+        delete [] m_spmlpw_t;
+        delete [] m_spmlpb;
+        m_spmlpw_t = new weights_biases[m_spmlp_n_hidden_layers_arm];
+        m_spmlpb = new weights_biases[m_spmlp_n_hidden_layers_arm];
+    }
+
+    InputBitstream bs_weights;
+    std::vector<UChar> &bs_fifo_weights = bs_weights.getFifo();
+    InputBitstream bs_biases;
+    std::vector<UChar> &bs_fifo_biases = bs_biases.getFifo();
+
+    TDecBinCABAC cabac_weights;
+    TDecBinCABAC cabac_biases;
+
+    bs_fifo_weights = frame_symbols.m_sparm_weights_hevc;
+    cabac_weights.init(&bs_weights);
+    cabac_weights.start();
+
+    bs_fifo_biases = frame_symbols.m_sparm_biases_hevc;
+    cabac_biases.init(&bs_biases);
+    cabac_biases.start();
+
+    struct cc_bs_layer_quant_info &arm_lqi = frame_symbols.sparm_lqi;
+
+    int q_step_w_shift = Q_STEP_ARM_WEIGHT_SHIFT[arm_lqi.q_step_index_nn_weight];
+    int q_step_b_shift = Q_STEP_ARM_BIAS_SHIFT[arm_lqi.q_step_index_nn_bias];
+    int arm_n_features = frame_symbols.spatial_prior.dim_sparm;
+    int32_t bucket[arm_n_features*arm_n_features]; // we transpose from this.
+
+    for (int idx = 0; idx < m_spmlp_n_hidden_layers_arm; idx++)
+    {
+        decode_weights_qi(&bucket[0], &cabac_weights, arm_lqi.scale_index_nn_weight, arm_n_features*arm_n_features, q_step_w_shift, ARM_PRECISION);
+        // transpose.
+        m_spmlpw_t[idx].update_to(arm_n_features*arm_n_features);
+        int kidx = 0;
+        for (int ky = 0; ky < arm_n_features; ky++)
+            for (int kx = 0; kx < arm_n_features; kx++)
+            {
+                m_spmlpw_t[idx].data[kidx++] = bucket[kx*arm_n_features+ky];
+            }
+        decode_weights_qi(m_spmlpb[idx], &cabac_biases, arm_lqi.scale_index_nn_bias, arm_n_features, q_step_b_shift, ARM_PRECISION*2);
+    }
+    decode_weights_qi(m_spmlpwOUT, &cabac_weights, arm_lqi.scale_index_nn_weight, arm_n_features*2, q_step_w_shift, ARM_PRECISION);
+    decode_weights_qi(m_spmlpbOUT, &cabac_biases,  arm_lqi.scale_index_nn_bias, 2, q_step_b_shift, ARM_PRECISION*2);
 }
 
 
@@ -369,6 +455,72 @@ void cc_frame_decoder::read_syn(struct cc_bs_frame_coolchic &frame_symbols)
 
             n_in_ft = syn.n_out_ft;
         }
+    }
+}
+
+void cc_frame_decoder::read_spatial_prior(struct cc_bs_frame_coolchic &frame_symbols){
+    if (frame_symbols.spatial_prior.downsampling_factor != m_spatial_prior_downsampling_factor)
+    {
+        m_spatial_prior_downsampling_factor = frame_symbols.spatial_prior.downsampling_factor;
+        const int h = m_gop_header.img_h / std::pow(2, m_spatial_prior_downsampling_factor);
+        const int w = m_gop_header.img_w / std::pow(2, m_spatial_prior_downsampling_factor);
+        m_spatial_prior_map.update_to(h,w,1, 1);
+        // zero the padding area.
+        int pad = m_spatial_prior_map.pad;
+        int stride = m_spatial_prior_map.stride;
+        auto spm_origin = m_spatial_prior_map.origin()-pad*stride-pad;
+
+        auto spm_chan = spm_origin;
+        for (int y = 0; y < h + 2*pad; y++, spm_chan+=stride)
+        {
+            *spm_chan = 0;
+        }
+        spm_chan = spm_origin;
+        for (int x = 0; x < w + 2*pad; x++, spm_chan++)
+        {
+            *spm_chan = 0;
+        }
+    }
+
+    InputBitstream bs_map;
+    std::vector<UChar> &bs_fifo_map = bs_map.getFifo();
+    TDecBinCABAC cabac_map;
+    bs_fifo_map = frame_symbols.m_spatial_prior_map_hevc;
+    cabac_map.init(&bs_map);
+    cabac_map.start();
+
+    frame_memory<int32_t> *dest = &m_spatial_prior_map;
+    int h = m_spatial_prior_map.h;
+    int w = m_spatial_prior_map.w;
+
+    BACContext bac_context;
+    bac_context.set_layer(&cabac_map, h, w, frame_symbols.hls_sig_blksize);
+
+    custom_sp_conv_11_int32_cpu_X_X_X(
+        m_spmlpw_t, m_spmlpb,
+        &m_spmlpwOUT, &m_spmlpbOUT,
+        get_context_indicies(frame_symbols.spatial_prior.dim_sparm, dest->stride), 
+        frame_symbols.spatial_prior.dim_sparm, 
+        frame_symbols.spatial_prior.n_hidden_sparm,
+        dest->origin(),
+        h, w, (dest->stride-w)/2, dest->stride,
+        bac_context
+        );
+    
+    if (m_verbosity >= 3)
+    {
+        printf("spatial prior map:\n");
+        auto src = m_spatial_prior_map.origin();
+        printf("Size: %dx%d\n", m_spatial_prior_map.w, m_spatial_prior_map.h);
+        for (int x=0; x<m_spatial_prior_map.h; x++, src+=2*m_spatial_prior_map.pad)
+        {
+            for (int y=0; y<m_spatial_prior_map.w; y++, src++)
+            {
+                printf("%d ", *src);
+            }
+            printf("\n");
+        }
+
     }
 }
 
@@ -487,6 +639,10 @@ void cc_frame_decoder::run_arm(struct cc_bs_frame_coolchic &frame_symbols)
 {
     // RUN ARM
     // latent-layer processing.
+    
+    // Temporary frame memory for resampled spatial prior
+    frame_memory<int32_t> spatial_prior_resampled;
+    
     for (int layer_number = 0; layer_number < frame_symbols.n_latent_n_resolutions; layer_number++)
     {
         int const h_grid = m_h_pyramid[layer_number];
@@ -508,6 +664,9 @@ void cc_frame_decoder::run_arm(struct cc_bs_frame_coolchic &frame_symbols)
         //frame_memory *dest = layer_number == 0 ? &m_syn_1 : &m_plane_pyramid[layer_number];
         frame_memory<int32_t> *dest = &m_plane_pyramid[layer_number];
         dest->zero_pad(0, m_arm_pad);
+        
+        // Resample spatial prior to match this layer's resolution
+        resample_spatial_prior(m_spatial_prior_map, spatial_prior_resampled, h_grid, w_grid, frame_symbols.spatial_prior.downsampling_factor, layer_number);
 
         // BAC decoding:
         InputBitstream bsBAC;
@@ -531,6 +690,8 @@ void cc_frame_decoder::run_arm(struct cc_bs_frame_coolchic &frame_symbols)
                                       get_context_indicies(frame_symbols.dim_arm, dest->stride), frame_symbols.dim_arm, frame_symbols.n_hidden_layers_arm,
                                       dest->origin(),
                                       h_grid, w_grid, (dest->stride-w_grid)/2,
+                                      spatial_prior_resampled.origin(),
+                                      layer_number, frame_symbols.n_latent_n_resolutions, frame_symbols.spatial_prior.layer_id_context,
                                       bac_context
                                       );
         else if (m_use_avx2 && frame_symbols.dim_arm == 16)
@@ -540,6 +701,8 @@ void cc_frame_decoder::run_arm(struct cc_bs_frame_coolchic &frame_symbols)
                                       get_context_indicies(frame_symbols.dim_arm, dest->stride), frame_symbols.dim_arm, frame_symbols.n_hidden_layers_arm,
                                       dest->origin(),
                                       h_grid, w_grid, (dest->stride-w_grid)/2,
+                                      spatial_prior_resampled.origin(),
+                                      layer_number, frame_symbols.n_latent_n_resolutions, frame_symbols.spatial_prior.layer_id_context,
                                       bac_context
                                       );
         else if (m_use_avx2 && frame_symbols.dim_arm == 24)
@@ -549,6 +712,8 @@ void cc_frame_decoder::run_arm(struct cc_bs_frame_coolchic &frame_symbols)
                                       get_context_indicies(frame_symbols.dim_arm, dest->stride), frame_symbols.dim_arm, frame_symbols.n_hidden_layers_arm,
                                       dest->origin(),
                                       h_grid, w_grid, (dest->stride-w_grid)/2,
+                                      spatial_prior_resampled.origin(),
+                                      layer_number, frame_symbols.n_latent_n_resolutions, frame_symbols.spatial_prior.layer_id_context,
                                       bac_context
                                       );
         else if (m_use_avx2 && frame_symbols.dim_arm == 32)
@@ -558,6 +723,8 @@ void cc_frame_decoder::run_arm(struct cc_bs_frame_coolchic &frame_symbols)
                                       get_context_indicies(frame_symbols.dim_arm, dest->stride), frame_symbols.dim_arm, frame_symbols.n_hidden_layers_arm,
                                       dest->origin(),
                                       h_grid, w_grid, (dest->stride-w_grid)/2,
+                                      spatial_prior_resampled.origin(),
+                                      layer_number, frame_symbols.n_latent_n_resolutions, frame_symbols.spatial_prior.layer_id_context,
                                       bac_context
                                       );
         else
@@ -566,10 +733,10 @@ void cc_frame_decoder::run_arm(struct cc_bs_frame_coolchic &frame_symbols)
                                       m_mlpw_t, m_mlpb,
                                       &m_mlpwOUT, &m_mlpbOUT,
                                       get_context_indicies(frame_symbols.dim_arm, dest->stride), frame_symbols.dim_arm, frame_symbols.n_hidden_layers_arm,
-
                                       dest->origin(),
                                       h_grid, w_grid, (dest->stride-w_grid)/2,
-
+                                      spatial_prior_resampled.origin(),
+                                      layer_number, frame_symbols.n_latent_n_resolutions, frame_symbols.spatial_prior.layer_id_context,
                                       bac_context
                                       );
 
@@ -1311,6 +1478,8 @@ frame_memory<SYN_INT_FLOAT> *cc_frame_decoder::run_syn(struct cc_bs_frame_coolch
 // returned value should be transformed or otherwise copied before calling decode_frame again.
 struct frame_memory<SYN_INT_FLOAT> *cc_frame_decoder::decode_frame(struct cc_bs_frame_coolchic &frame_symbols)
 {
+    read_sparm(frame_symbols);
+    read_spatial_prior(frame_symbols);
     read_arm(frame_symbols);
     read_ups(frame_symbols);
     read_syn(frame_symbols);
